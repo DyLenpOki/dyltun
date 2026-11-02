@@ -1,0 +1,41 @@
+# Gradle and Android build output
+.gradle/
+.kotlin/
+**/build/
+out/
+.cxx/
+.externalNativeBuild/
+captures/
+
+# Machine-specific IDE and SDK configuration
+.idea/
+.vscode/
+*.iml
+local.properties
+
+# Local credentials and signing material
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+key.properties
+keystore.properties
+signing.properties
+
+# Generated packages, diagnostics and network captures
+*.apk
+*.ap_
+*.aab
+*.aar
+*.hprof
+*.log
+*.pcap
+*.pcapng
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

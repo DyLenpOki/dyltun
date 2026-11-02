@@ -1,0 +1,22 @@
+<resources>
+    <string name="app_name">dyltun 开发示例</string>
+    <string name="description">仅捕获 198.18.0.1/32。TCP/UDP DNS 转到 1.1.1.1:53；HTTP 转到 example.com:80，/local-health 由 Hook 本地响应。其他 TCP 转到 1.1.1.1:443；阻断 blocked.example.com 明文 SNI，MQTT 转到本机 1883。</string>
+    <string name="start">授权并启动 VPN 示例</string>
+    <string name="probe">UDP 查询 example.com</string>
+    <string name="probe_tcp">TCP 查询 example.com</string>
+    <string name="probe_http">HTTP 本地响应测试</string>
+    <string name="probing_http">正在验证 HTTP Hooks…</string>
+    <string name="probe_http_success">HTTP 200，本地 JSON 响应和 response Hook 均验证通过</string>
+    <string name="probe_http_error">HTTP 测试失败：%1$s</string>
+    <string name="stop">停止 VPN</string>
+    <string name="idle">等待启动</string>
+    <string name="started">已请求启动；可执行 DNS 测试</string>
+    <string name="denied">VPN 授权未通过</string>
+    <string name="stopped">已请求停止</string>
+    <string name="probing">正在查询…</string>
+    <string name="probe_success">收到 DNS 响应：%1$d 字节，RCODE=%2$d</string>
+    <string name="probe_tcp_success">TCP DNS 响应：%1$d 字节，RCODE=%2$d</string>
+    <string name="probe_error">DNS 测试失败：%1$s</string>
+    <string name="channel_name">VPN 开发示例</string>
+    <string name="vpn_running">TCP/UDP 测试 VPN 正在运行</string>
+</resources>

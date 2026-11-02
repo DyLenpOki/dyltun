@@ -1,0 +1,22 @@
+name: Feature request / 功能建议
+description: Propose a capability or improvement with a concrete use case.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case / 使用场景
+      description: Explain what you are trying to accomplish and the current limitation. 中文或 English 均可。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior / 建议行为
+      description: Include an API example or protocol behavior if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives / 已考虑的替代方案

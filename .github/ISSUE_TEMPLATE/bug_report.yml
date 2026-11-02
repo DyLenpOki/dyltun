@@ -1,0 +1,43 @@
+name: Bug report / 问题反馈
+description: Report a reproducible forwarding, HTTP or integration problem.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please provide a small reproduction. Remove credentials, cookies, private IPs and personal data from logs and packet captures.
+        可使用中文。请提供最小复现，并对日志和抓包中的敏感数据脱敏。
+        For a vulnerability, follow SECURITY.md instead of posting exploit details publicly.
+  - type: input
+    id: version
+    attributes:
+      label: Version / 版本
+      description: Include the dyltun version and Git commit when using a snapshot.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 环境
+      description: Android version/API, device or emulator, ABI, JDK, AGP and host Kotlin version.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction / 复现步骤
+      description: Include the relevant VPN Builder configuration, routing rules and Hooks, plus a request or test that reproduces the failure.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior / 预期与实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs / 脱敏日志
+      description: Include the full exception and connection information when available.
+      render: text
