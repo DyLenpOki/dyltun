@@ -81,7 +81,7 @@ dyltun 接收已经建立的 TUN FD。宿主仍负责 Android VPN 生命周期�
 
 ### 2.2 服务中的初始化
 
-以下代码展示服务内的库接入部分，包含四项根配置。宿主应在授权并调用 `startForeground()` 后调用 `startTunnel()`；授权界面、启动命令和通知实现见可运行的 [DemoVpnService.kt](../sample/src/main/kotlin/com/dylenpoki/dyltun/sample/DemoVpnService.kt) 与 [MainActivity.kt](../sample/src/main/kotlin/com/dylenpoki/dyltun/sample/MainActivity.kt)。
+以下代码先独立构造配置，服务内只负责建立 FD 和启动会话。宿主应在授权并调用 `startForeground()` 后调用 `startTunnel()`；授权界面、启动命令和通知实现见可运行的 [DemoVpnService.kt](../sample/src/main/kotlin/com/dylenpoki/dyltun/sample/DemoVpnService.kt) 与 [MainActivity.kt](../sample/src/main/kotlin/com/dylenpoki/dyltun/sample/MainActivity.kt)。
 
 ```kotlin
 package example.vpn
@@ -90,13 +90,14 @@ import android.net.VpnService
 import com.dylenpoki.dyltun.BodyLimit
 import com.dylenpoki.dyltun.BodyLimits
 import com.dylenpoki.dyltun.DyltunSession
+import com.dylenpoki.dyltun.Endpoint
 import com.dylenpoki.dyltun.HttpFlow
 import com.dylenpoki.dyltun.HttpHeaders
 import com.dylenpoki.dyltun.HttpHooks
 import com.dylenpoki.dyltun.HttpResponse
-import com.dylenpoki.dyltun.MqttInspector
-import com.dylenpoki.dyltun.TlsClientHelloInspector
+import com.dylenpoki.dyltun.RoutingDecision
 import com.dylenpoki.dyltun.dyltun
+import com.dylenpoki.dyltun.dyltunConfig
 
 private object AppHttpHooks : HttpHooks {
     override fun request(flow: HttpFlow) {
@@ -117,6 +118,29 @@ private object AppHttpHooks : HttpHooks {
     }
 }
 
+private val appConfig = dyltunConfig {
+    hooks = AppHttpHooks
+    bodyLimits = BodyLimits(
+        request = BodyLimit(
+            maxBufferedBytes = 512L * 1024,
+            maxDecodedBytes = 2L * 1024 * 1024
+        ),
+        response = BodyLimit(
+            maxBufferedBytes = 2L * 1024 * 1024,
+            maxDecodedBytes = 8L * 1024 * 1024
+        ),
+        maxTotalBufferedBytes = 32L * 1024 * 1024
+    )
+    routing {
+        tlsSni(
+            domains = listOf("blocked.example.com", "blocked.example.org"),
+            includeSubdomains = true,
+            action = RoutingDecision.Reset
+        )
+        mqtt(action = RoutingDecision.Redirect(Endpoint("127.0.0.1", 1883)))
+    }
+}
+
 class AppVpnService : VpnService() {
     private var session: DyltunSession? = null
 
@@ -132,34 +156,9 @@ class AppVpnService : VpnService() {
             .establish() ?: error("VPN permission is unavailable")
 
         session = try {
-            dyltun(fd) {
-                hooks = AppHttpHooks
-                bodyLimits = BodyLimits(
-                    request = BodyLimit(
-                        maxBufferedBytes = 512L * 1024,
-                        maxDecodedBytes = 2L * 1024 * 1024
-                    ),
-                    response = BodyLimit(
-                        maxBufferedBytes = 2L * 1024 * 1024,
-                        maxDecodedBytes = 8L * 1024 * 1024
-                    ),
-                    maxTotalBufferedBytes = 32L * 1024 * 1024
-                )
-                protocols {
-                    install(TlsClientHelloInspector())
-                    install(MqttInspector())
-                }
-                routing {
-                    tlsSni(listOf("blocked.example.com", "blocked.example.org"), includeSubdomains = true) {
-                        reset()
-                    }
-                    mqtt {
-                        redirect("127.0.0.1", 1883)
-                    }
-                }
-            }
+            dyltun(fd, appConfig)
         } catch (error: Throwable) {
-            // 配置阶段同步抛错时，FD 所有权仍在宿主。
+            // 同步启动调用未返回 Session 时，由宿主关闭 FD。
             fd.close()
             throw error
         }
@@ -197,11 +196,20 @@ session = dyltun(fd)
 
 ## 3. 初始化 API 与配置
 
-### 3.1 两个入口
+### 3.1 配置工厂与启动入口
 
 以下为公开函数签名，省略实现：
 
 ```kotlin
+fun dyltunConfig(
+    configure: DyltunConfig.Builder.() -> Unit = {}
+): DyltunConfig
+
+fun VpnService.dyltun(
+    fd: ParcelFileDescriptor,
+    config: DyltunConfig
+): DyltunSession
+
 fun VpnService.dyltun(
     fd: ParcelFileDescriptor,
     configure: DyltunConfig.Builder.() -> Unit = {}
@@ -221,7 +229,11 @@ fun VpnService.dyltun(
 // 无配置。
 dyltun(fd)
 
-// 推荐：统一 DSL。
+// 可复用配置；可在 VpnService 之外构造。
+val config = dyltunConfig { hooks = httpHooks }
+dyltun(fd, config)
+
+// 少量配置也可直接使用行内 DSL。
 dyltun(fd) { hooks = httpHooks }
 
 // 便捷重载。
@@ -241,10 +253,12 @@ dyltun(fd) { hooks = null }
 |---|---|---|
 | `hooks` | `HttpHooks?` | `null`；非空时自动启用内置明文 HTTP/1.1 处理 |
 | `bodyLimits` | `BodyLimits` | `BodyLimits()`；限制 HTTP Body 聚合、解码与修改 |
-| `protocols { ... }` | `ProtocolConfig.Builder.() -> Unit` | 空识别器列表；通过 `install()` 注册 |
+| `protocols { ... }` | `ProtocolConfig.Builder.() -> Unit` | 默认空；`install()` 显式注册；内置值动作规则可补齐默认识别器 |
 | `routing { ... }` | `RoutingConfig.Builder.() -> Unit` | 空规则集；默认转发 |
 
 配置块同步执行并生成不可变配置快照。重复调用 `protocols {}` / `routing {}` 会追加条目。Hooks、识别器和规则实例保留引用，共享状态应满足各自的并发约束。配置对象不提供运行中热更新入口；变更配置需要关闭旧 Session 后创建新 Session。
+
+`dyltunConfig {}` 不访问 FD、服务或网络，可在普通 Kotlin 代码中构造和校验。同一个配置可启动多个 Session；各会话独立管理连接和预算，但共享 Hooks、识别器和规则对象，宿主须保证这些对象的并发安全。每次启动仍需新的 FD。行内 `dyltun(fd) { ... }` 通过同一工厂构造配置，之后走相同启动路径。
 
 ### 3.3 FD 所有权与启动结果
 
@@ -530,20 +544,32 @@ bodyLimits = BodyLimits(
 | `TlsClientHelloInspector()` | `TlsClientHello(serverName: String?)` | TCP 上可见的 TLS ClientHello；`serverName` 可以为 `null` |
 | `MqttInspector()` | `MqttConnect(version: Int, clientId: String)` | 明文 MQTT CONNECT，版本 3 / 4 / 5 对应 MQTT 3.1 / 3.1.1 / 5 |
 
-第 2 节展示了配套的 `install()` 与规则：
+推荐使用第 2 节的值动作规则：
 
-- `tlsSni(...) { ... }`：匹配给定域名中的任意一个；默认精确匹配，`includeSubdomains = true` 时也匹配以点分隔的子域名，不是任意字符串包含匹配。
-- `mqtt { ... }`：匹配已识别的 MQTT 连接。
-- 两种内置规则的动作块必须且只能选择一个：`forward()`、`reset()` 或 `redirect(host, port)`。
+- `tlsSni(domains, ..., action = ...)`：匹配给定域名中的任意一个；默认精确匹配，`includeSubdomains = true` 时也匹配以点分隔的子域名，不是任意字符串包含匹配。
+- `mqtt(action = ...)`：匹配已识别的 MQTT 连接。
+- 两者的 `action` 只接受 `RoutingDecision.Forward`、`Reset` 或 `Redirect(Endpoint)`；`Continue` / `Drop` 在配置时拒绝。
+- 这两种值动作重载自动补齐所需默认识别器；显式 `install()` 相同 ProtocolId 的对象始终优先，与配置块顺序无关。每个 ProtocolId 只保留一个识别器。
 
 `tlsSni` 支持域名集合，并保留原有单域名重载。以下为签名摘录：
 
 ```kotlin
 fun tlsSni(
+    domains: Iterable<String>,
+    includeSubdomains: Boolean = false,
+    action: RoutingDecision
+)
+
+fun mqtt(action: RoutingDecision)
+
+// 以下动作块入口继续兼容；需要显式安装识别器。
+fun tlsSni(
     domain: String,
     includeSubdomains: Boolean = false,
     action: TcpActionBuilder.() -> Unit
 )
+
+fun mqtt(action: TcpActionBuilder.() -> Unit)
 
 fun tlsSni(
     domains: Iterable<String>,
@@ -557,9 +583,10 @@ fun tlsSni(
 ```kotlin
 routing {
     tlsSni(
-        listOf("blocked.example.com", "blocked.example.org"),
-        includeSubdomains = true
-    ) { reset() }
+        domains = listOf("blocked.example.com", "blocked.example.org"),
+        includeSubdomains = true,
+        action = RoutingDecision.Reset
+    )
 }
 ```
 
@@ -567,7 +594,7 @@ routing {
 
 域名在配置时复制、按 IDN/大小写/末尾点规范化并去重；后续修改传入集合不会改变规则。空域名组或任意一个非法域名都会使该次配置失败，不会只安装其中的合法域名。不支持通配符模式。
 
-缺少规则依赖的识别器、重复 ProtocolId、缺失动作或设置多个动作，也会在配置阶段抛错。
+旧动作块 `tlsSni(...) { reset() }` / `mqtt { redirect(...) }` 保留原校验方式，须在 `protocols` 中显式安装依赖，或由另一条值动作规则补齐。动作块必须且只能选择一个 `forward()`、`reset()` 或 `redirect(host, port)`。自定义规则不自动安装识别器。补齐默认值后仍有缺失依赖、重复显式 ProtocolId、缺失动作或多个动作，均在接管 FD 前报错。
 
 探测目前仅针对客户端 TCP 流前缀，最多 65,535 字节 / 握手后 1 秒；不完整或未知协议回退普通转发。TLS 识别不解密 HTTPS；ECH、无 SNI、QUIC、MQTTS 不保证识别，不能把这套规则视为所有域名流量的完整阻断能力。
 
@@ -578,30 +605,28 @@ routing {
 ```kotlin
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
-import com.dylenpoki.dyltun.ConnectionRule
 import com.dylenpoki.dyltun.DyltunSession
 import com.dylenpoki.dyltun.Endpoint
-import com.dylenpoki.dyltun.RoutingContext
 import com.dylenpoki.dyltun.RoutingDecision
 import com.dylenpoki.dyltun.dyltun
 
 fun VpnService.startWithDnsRedirect(fd: ParcelFileDescriptor): DyltunSession =
     dyltun(fd) {
         routing {
-            rule(object : ConnectionRule {
-                override fun evaluate(context: RoutingContext): RoutingDecision {
-                    return if (context.connection.destinationPort == 53) {
-                        RoutingDecision.Redirect(Endpoint("1.1.1.1", 53))
-                    } else {
-                        RoutingDecision.Continue
-                    }
+            rule { context ->
+                if (context.connection.destinationPort == 53) {
+                    RoutingDecision.Redirect(Endpoint("1.1.1.1", 53))
+                } else {
+                    RoutingDecision.Continue
                 }
-            })
+            }
         }
     }
 ```
 
 这里不依赖协议识别，不需要 `protocols {}`。仅匹配端口，不修改 DNS 报文内容。
+
+lambda 入口为 `rule(requiredProtocols: Set<ProtocolId> = emptySet(), evaluate: (RoutingContext) -> RoutingDecision)`；依赖集合在注册时复制。已有 `rule(rule: ConnectionRule)` 保持兼容，适合复用具名策略。两种形式采用相同的依赖、传输协议动作校验和拒绝优先规则。
 
 | `RoutingDecision` | TCP | UDP | 含义 |
 |---|---|---|---|
@@ -846,14 +871,14 @@ suspend fun closeSession(session: DyltunSession) {
 
 | 现象 / 需求 | 检查或处理 |
 |---|---|
-| 初始化就抛 `Missing protocol inspectors` | 为 `tlsSni` / `mqtt` 或自定义 `requiredProtocols` 安装对应识别器 |
+| 初始化就抛 `Missing protocol inspectors` | 为旧动作块和自定义 `requiredProtocols` 安装对应识别器；内置值动作规则会补齐其默认依赖 |
 | `dyltun()` 返回后不转发 | 收集 `state` 与 `events`，检查异步启动失败、VPN 路由及底层网络 |
 | HTTP Hook 没有执行 | 确认 hooks 非空、流量进入 TUN、内容为明文 HTTP/1.1，且未先被路由拒绝 |
 | 大 Body 的 `text` / `content` 为 `null` | 检查 `bodyState`、方向限额和总预算；未知 Content-Encoding 为 `OPAQUE` |
 | 小 Body 读取时报预算不足 | getter 副本、文本解码与临时容量也计费；避免重复读取，调整总预算 |
 | 改 Host 后仍连原服务器 | 使用 `request.url` 改候选目标，或配置 `Redirect` |
 | 要给 HTTPS 加/改 Header | 当前不支持 TLS 解密；SNI 仅用于连接路由 |
-| 要把 MQTT 转到本地 | 安装 MqttInspector 并 redirect；确保设备端 broker 已启动 |
+| 要把 MQTT 转到本地 | 使用 `mqtt(action = RoutingDecision.Redirect(Endpoint("127.0.0.1", 1883)))`；确保设备端 broker 已启动 |
 | 退出后 VPN 仍在运行 | 显式向服务发送停止命令并 `close()`，不要仅依赖 `stopService()` |
 
 当前版本还有以下使用边界：

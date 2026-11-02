@@ -23,6 +23,7 @@ P0 必须完整表达 hooks/bodyLimits/protocols/routing；P5 才交付具体 TL
 - [x] 建立 :dyltun / :sample、Kotlin DSL、Wrapper 和锁定的工具链，记录 minSdk。
 - [x] 核对 Kotlin 源码约束及依赖，不引入自定义 Java/native 协议栈。
 - [x] 实现 API.md 中四个根入口、便捷重载和不可变配置快照。
+- [x] 增加独立 dyltunConfig 工厂、配置启动重载、内置值动作规则与 lambda rule，保留旧调用形式。
 - [x] 实现协议注册/规则容器、依赖/数值/动作校验；没有执行能力时不能静默忽略规则。
 - [x] 定义 Session 状态、FD 接管、close/awaitClosed 和单连接错误观察契约。
 - [x] 定义 HTTP Flow/Headers/make/BodyLimits，明确空内容与不可用内容。

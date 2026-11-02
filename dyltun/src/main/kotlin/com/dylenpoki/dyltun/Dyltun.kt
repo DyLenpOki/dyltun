@@ -5,8 +5,8 @@ import android.os.ParcelFileDescriptor
 import com.dylenpoki.dyltun.internal.android.ProtectedDatagramConnector
 import com.dylenpoki.dyltun.internal.android.ProtectedStreamConnector
 import com.dylenpoki.dyltun.internal.android.TunDevice
-import com.dylenpoki.dyltun.internal.engine.ManagedSession
 import com.dylenpoki.dyltun.internal.engine.IpPacketRuntime
+import com.dylenpoki.dyltun.internal.engine.ManagedSession
 
 /**
  * Builds configuration synchronously, then transfers descriptor ownership to the returned session.
@@ -15,12 +15,13 @@ import com.dylenpoki.dyltun.internal.engine.IpPacketRuntime
 fun VpnService.dyltun(
     fd: ParcelFileDescriptor,
     configure: DyltunConfig.Builder.() -> Unit = {}
-): DyltunSession {
-    val config = DyltunConfig.Builder().apply(configure).build()
-    return ManagedSession(fd) { emit ->
+): DyltunSession = dyltun(fd, dyltunConfig(configure))
+
+/** Starts a session from a validated configuration. The returned session owns the descriptor. */
+fun VpnService.dyltun(fd: ParcelFileDescriptor, config: DyltunConfig): DyltunSession =
+    ManagedSession(fd) { emit ->
         IpPacketRuntime(TunDevice(fd), config, ProtectedDatagramConnector(this), emit, ProtectedStreamConnector(this))
     }.also { it.start() }
-}
 
 fun VpnService.dyltun(fd: ParcelFileDescriptor, hooks: HttpHooks?): DyltunSession {
     val configuredHooks = hooks

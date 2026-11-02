@@ -10,7 +10,7 @@
 |---|---|
 | 其他 Android 应用易于接入 | 一个 :dyltun Android Library，对外 Kotlin API；另有 :sample 演示宿主 |
 | 只使用 Kotlin | 库源码和构建脚本使用 Kotlin/Kotlin DSL；允许 Android/JDK API、Kotlin 标准库和协程，不引入自定义 Java/native 协议实现 |
-| 简洁初始化 | VpnService 扩展 dyltun(fd) { ... }，隐式取得 protect 能力 |
+| 简洁初始化 | dyltunConfig { ... } 可独立构造配置；VpnService 内 dyltun(fd, config)，保留行内 DSL，隐式取得 protect 能力 |
 | 完整配置面 | 同一个 Builder 包含 hooks、bodyLimits、protocols、routing |
 | 首版核心功能 | IPv4 TCP/UDP 转发、明文 HTTP/1.1 修改、HttpResponse.make 本地响应 |
 | 后续协议能力 | 开放协议识别/处理和连接策略接口；用 TLS SNI 阻断、MQTT 重定向验证 |
@@ -40,6 +40,8 @@
 
 当前公共 API/SPI 位于根包；实现已有 internal.android / packet / stack / engine / inspection / protocol.http1 / transport。路由契约及评估器在根包 RoutingConfig.kt 中。IpPacketRuntime 组装包循环、TCP/UDP 与 HTTP；不使用 native 后端。
 
+HTTP 内部分为三个职责：Http1Connection 管理按序事务循环与事务资源作用域；HttpExchange 编排单次请求、本地/上游分支、错误回退及升级；HttpResponseWriter 统一响应 Hook、Body 准备和输出。ExchangeResult 明确表达继续复用、关闭或已升级。ResponseInput 区分本地响应与携带完整头/Body 上下文的上游响应，避免多组可空参数。具体兼容性约束见 [REFACTORING.md](REFACTORING.md)。
+
 ```text
 TUN 出站 IP 包
   → IP 校验/解析/必要分片重组
@@ -59,7 +61,7 @@ TUN 出站 IP 包
 
 ## 3. 入口、FD 所有权与关闭
 
-1. 同步执行 DSL、检查数值和规则依赖，再构建不可变配置。
+1. dyltunConfig 同步执行 DSL、补齐内置值动作规则需要的默认识别器、检查数值和规则依赖，再构建不可变配置；不接触服务或 FD。行内 DSL 走相同工厂；预构造配置可以复用。
 2. 配置失败时抛异常，不接管 FD，调用者负责关闭。
 3. 成功返回 Session 后转交 FD；调用者不得继续读写、复用或关闭。
 4. 转发异步启动；接管后的启动失败进入 Failed，并回收已创建资源。
@@ -81,6 +83,7 @@ TUN 使用平台 Os.poll 和非阻塞 Unix datagram socketpair 唤醒，不忙�
 - 额外识别器只读取有界客户端前缀，返回匹配/不匹配/需要更多数据；数据完整重放给后续处理器。
 - 探测必须有时间和字节上限。未知协议默认转发，不能无限等待服务端先发数据协议的客户端首包。
 - 规则依赖的识别器必须在配置完成后可用；缺失依赖在 FD 接管前报错，不能让规则静默失效。
+- 新的 tlsSni(domains, action = ...) / mqtt(action = ...) 补齐默认 TLS/MQTT 识别器，显式注册同 ID 的识别器优先，与配置块顺序无关。旧动作块和自定义规则保留依赖校验；不自动为任意 requiredProtocols 安装识别器。lambda rule 与 ConnectionRule 使用同一评估器。
 
 ### 4.2 决策顺序
 
@@ -121,9 +124,13 @@ ECH、无 SNI、QUIC 和 MQTTS 密文不能承诺提取真实目标域名/MQTT �
 
 本地响应来源为 LOCAL；不为该请求新建上游连接。本地响应仍执行一次 response Hook，不递归调用。
 
+请求与响应 BufferedBody 的挂起读取属于外层事务作用域；即使聚合超时转流式或拒绝，事务退出时也会取消待读取，不让内层上传/响应协程等待它们。事务结束释放 BodyAccount，所有退出分支使用相同资源边界。
+
 普通 HTTP 上游请求以 Content-Length/chunked 等 framing 标识结束，发送完后不得主动 shutdownOutput/发送 FIN；某些 HTTP 前端会将其视为客户端中止请求。当前每笔事务独占上游 Socket，等待响应处理结束后再关闭。101 升级后的原始双向流按真实输入 EOF 进行半关闭。
 
 上游 I/O 或响应提前 EOF 在最终响应提交前失败时，可进入 error(flow, cause) Hook。若它设置 response，则按 LOCAL 回退执行一次 response Hook，发送后关闭客户端连接，同时保留原始连接错误事件。未设置 response 时保留原始失败。路由拒绝、协议/Body 校验、客户端错误、Hook 异常、取消和已提交最终响应后的故障不能触发此回退；不得自动重发已可能提交给上游的业务请求。
+
+HttpExchange 使用显式响应阶段控制回退：等待上游时允许符合条件的上游故障回退；写中间响应时禁止；中间响应完整写完后恢复等待阶段；进入最终响应处理或 101 升级后不再回退。响应 Hook 抛错也不进入 error Hook。
 
 本地响应初始内容和 response Hook 修改后的结果都检查响应限额。response Hook 不能把 response 设回 null 并重新发请求。若替换尚未消费完的上游响应，要关闭或有界排空旧上游，不能错误复用剩余数据。
 

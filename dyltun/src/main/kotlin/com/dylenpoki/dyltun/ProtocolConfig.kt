@@ -45,8 +45,17 @@ class ProtocolConfig private constructor(val inspectors: List<ProtocolInspector>
             inspectors += inspector
         }
 
-        internal fun build(): ProtocolConfig = ProtocolConfig(
-            Collections.unmodifiableList(ArrayList(inspectors))
-        )
+        internal fun build(defaults: Set<ProtocolId> = emptySet()): ProtocolConfig {
+            val resolved = ArrayList(inspectors)
+            for (id in defaults) {
+                if (resolved.any { it.protocolId == id }) continue
+                resolved += when (id) {
+                    ProtocolId.TLS -> TlsClientHelloInspector()
+                    ProtocolId.MQTT -> MqttInspector()
+                    else -> error("No default inspector for ${id.value}")
+                }
+            }
+            return ProtocolConfig(Collections.unmodifiableList(resolved))
+        }
     }
 }

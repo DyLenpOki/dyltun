@@ -90,11 +90,11 @@ JAVA_HOME 仍指向自己的 JDK 21。没有该错误时无需 JAVA_TOOL_OPTIONS
 
 安装 sample-debug.apk，启动应用，点击授权并启动，然后执行 TCP/UDP DNS 与 HTTP 本地响应测试。宿主只捕获 198.18.0.1/32；DNS 转向 1.1.1.1:53，回复仍表现为来自原测试目标。/local-health 在 request Hook 中生成 JSON，response Hook 添加 X-Dyltun。DNS 成功依赖物理网络允许访问该服务，本地 HTTP 不需要访问上游。
 
-DemoVpnService 包含授权后启动、前台通知、Builder、单次 dyltun 初始化、状态/事件观察和关闭。使用非阻塞 TUN，显式写出 setBlocking(false)；这也是 API 21–29 的宿主要求。DemoHttpHooks 独立展示 Hooks，服务内实际启用 TLS/MQTT 识别与连接规则。
+DemoVpnService 包含授权后启动、前台通知、Builder、dyltun(fd, config) 初始化、状态/事件观察和关闭。配置通过 dyltunConfig 独立构造，内置值动作规则自动补齐 TLS/MQTT 识别器，通用规则使用 lambda。使用非阻塞 TUN，显式写出 setBlocking(false)；这也是 API 21–29 的宿主要求。DemoHttpHooks 独立展示 Hooks。
 
 停止按钮通过 ACTION_STOP 命令让服务先关闭 Session，再 stopSelf。Android 系统可能仍绑定 VpnService，不能只依赖 Activity.stopService 触发 onDestroy。API 34 已验证 DNS 成功并停止后无活跃 VPN/服务。
 
-FullApiExample.kt 单独编译完整四块配置和 Body 自定义值；该函数未被示例服务调用。四项入口现均已接通，不因非空 Hooks/识别器而启动失败。
+FullApiExample.kt 单独编译可复用配置、Hooks、Body 自定义值和浅层路由写法；该函数未被示例服务调用。四项根入口均已接通，只有显式覆盖识别器或自定义协议需要额外的 protocols 块；旧动作块的依赖要求保持兼容，见 API.md。
 
 当前仍需补齐 ICMP/PMTU、网络变化和长期真机验收；示例没有声明 IPv6 路由或全局流量保护。范围和资源限制见 IMPLEMENTATION.md。
 

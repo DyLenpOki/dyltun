@@ -7,11 +7,11 @@
 | 范围 | 已实现 | 主要边界 |
 |---|---|---|
 | Kotlin Android Library | :dyltun、:sample、AAR/Maven、本地独立宿主编译 | minSdk 21；运行证据目前集中于 API 34 模拟器 |
-| 根 DSL | hooks/bodyLimits/protocols/routing、便捷重载、配置快照与依赖校验 | 扩展对象保留引用，宿主保证共享状态的并发安全 |
+| 根 DSL | dyltunConfig 独立配置、dyltun(fd, config)、行内/可空 Hooks 重载、配置快照与依赖校验 | 扩展对象保留引用，宿主保证共享状态的并发安全 |
 | Session/TUN | FD 接管、状态/有界事件、poll/唤醒、非阻塞关闭、清理异常保留 | API 21–29 要求 Builder 默认非阻塞 FD 或 setBlocking(false) |
 | IPv4/UDP | 长度/校验和/选项、有限分片重组、转发/Redirect/Drop、空包/多响应 | 没有完整 ICMP 错误转换、PMTU、网络切换迁移；不转发 IPv6 |
 | TCP | 独立序列空间、握手、窗口、乱序/重复、RTT/RTO/快速重传、基本拥塞控制、半关闭/RST/TIME_WAIT | 不协商窗口缩放、SACK、时间戳；尚无长期真机/性能结论 |
-| 协议路由 | 开放 inspector/rule SPI、TLS ClientHello/SNI 域名集合阻断、MQTT CONNECT 重定向、完整前缀重放 | 探测最多 65,535 字节/1 秒；不完整或未知协议默认转发 |
+| 协议路由 | 开放 inspector/rule SPI、lambda rule、TLS 域名集合/MQTT 值动作自动默认识别器、完整前缀重放 | 显式识别器优先；旧动作块/自定义规则保留依赖校验；探测最多 65,535 字节/1 秒 |
 | HTTP/1.1 | 增量头部/Body 编解码、chunked/trailers、Content-Length、关闭分隔、持久客户端连接与顺序流水请求 | 当前每笔事务使用独立上游 Socket，尚不做上游连接池 |
 | HTTP Hooks | 请求/响应 URL、Header、Body 修改、独立有界执行器、连接内顺序、上游失败时的 error Hook 本地回退 | 仅明文 HTTP/1.1；error 不恢复 Hook/协议/Body 拒绝或已提交响应；同步 Hook 无法被安全强杀，可能延迟 awaitClosed |
 | 本地响应 | request 中设置 flow.response、HttpResponse.make、LOCAL 来源、零上游连接、一次 response Hook | 未读完上传时发送响应后关闭；旧上游响应被替换时关闭其 Socket |
@@ -31,6 +31,8 @@
 - internal.inspection：保留原始前缀的有界探测与多协议元信息。
 - internal.engine：会话、五元组表、预算、唯一 TUN 写入线程与处理器组装。
 - internal.protocol.http1：增量编解码、Body 策略、Hooks、本地响应和协程桥接。
+
+HTTP 编排已拆分：Http1Connection 负责连接循环和事务清理，HttpExchange 负责单次事务及恢复阶段，HttpResponseWriter 统一上游/本地/错误回退的响应处理。事务结果使用明确枚举，上游响应上下文使用类型封装。TCP/UDP 算法、唯一包循环和 TUN 写线程归属不变；完整兼容性检查见 [REFACTORING.md](REFACTORING.md)。
 
 Session 拥有原始 PFD；TunDevice 仅关闭自己的唤醒 socketpair。包循环唯一操作 TCP 状态和写入 TUN。HTTP 处理器只接触有序字节流，通过有界 Channel 与包循环交换数据。应用侧 TCP 与系统上游 Socket 使用独立序列空间，修改长度无需在原 TCP 序列号上做差量映射。
 
@@ -62,6 +64,10 @@ Body 预算在聚合、连续数组、解压/重编码和模型副本分配前�
 REJECT 在聚合阶段、最终响应头尚未发出时返回空 Body 的 413（请求过大）、502（响应过大）、503（Session 预算耗尽）、408/504（请求/响应聚合超时），然后用 FIN 关闭客户端并发出 ConnectionError。引擎错误不进入正常 Hooks，也不继续处理流水请求。畸形 HTTP、Hook 异常或 Hook/本地响应结果超限仍复位所属 TCP，不提交部分修改。
 
 ## 验证证据
+
+本轮兼容性简化后，124 项 JVM 测试、8 项 API 34 Android 测试均通过，无失败或跳过。与 CI 相同的 145 个 Gradle 任务完成，库/示例 Lint 无错误（仍有 1 / 4 条既有提醒）；release AAR、源码包、本地 Maven publication、测试 APK 和示例 APK 构建通过。新增配置工厂/启动重载、默认识别器优先级、lambda 规则、103 后 EOF 回退与 101 后禁止回退均有验证。独立宿主编译了新旧 API 和文档完整示例；既有 Kotlin 2.2.10 / AGP 8.13.2 宿主的 10 项单元测试和 debug APK 构建通过。本轮未重跑真实 VPN 网络或业务请求。拆分、兼容性约束及结果见 [REFACTORING.md](REFACTORING.md)。
+
+以下保留此前的验证过程和覆盖范围：
 
 JVM 测试覆盖配置/模型、IPv4、UDP、TCP endpoint、真实 localhost Socket、协议探测与 HTTP：
 

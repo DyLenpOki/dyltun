@@ -113,6 +113,22 @@ class DescriptorTest {
         assertFalse(descriptor.fileDescriptor.valid())
     }
 
+    @Test fun prebuiltConfigurationStartsAndClosesOwnedDescriptor() = withPair { descriptor, _ ->
+        val config = dyltunConfig {
+            routing { tlsSni(listOf("example.com"), action = RoutingDecision.Reset) }
+        }
+        val session = VpnService().dyltun(descriptor, config)
+        try {
+            runBlocking { withTimeout(3000) { session.state.first { it == DyltunState.Running || it is DyltunState.Failed } } }
+            assertEquals(DyltunState.Running, session.state.value)
+        } finally {
+            session.close()
+            runBlocking { withTimeout(3000) { session.awaitClosed() } }
+        }
+        assertEquals(DyltunState.Stopped, session.state.value)
+        assertFalse(descriptor.fileDescriptor.valid())
+    }
+
     private fun withPair(block: (ParcelFileDescriptor, ParcelFileDescriptor) -> Unit) {
         val first = FileDescriptor()
         val second = FileDescriptor()

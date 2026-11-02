@@ -1,5 +1,9 @@
 package com.dylenpoki.dyltun
 
+/** Builds and validates a reusable configuration without taking ownership of a TUN descriptor. */
+fun dyltunConfig(configure: DyltunConfig.Builder.() -> Unit = {}): DyltunConfig =
+    DyltunConfig.Builder().apply(configure).build()
+
 class DyltunConfig private constructor(
     val hooks: HttpHooks?,
     val bodyLimits: BodyLimits,
@@ -22,8 +26,8 @@ class DyltunConfig private constructor(
         }
 
         internal fun build(): DyltunConfig {
-            val protocols = protocolBuilder.build()
             val routing = routingBuilder.build()
+            val protocols = protocolBuilder.build(routing.defaultInspectors)
             val available = protocols.inspectors.map { it.protocolId }.toSet()
             val missing = routing.rules.flatMap { it.requiredProtocols }.toSet() - available
             require(missing.isEmpty()) { "Missing protocol inspectors: ${missing.joinToString { it.value }}" }

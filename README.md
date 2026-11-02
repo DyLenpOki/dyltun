@@ -73,7 +73,7 @@ The host must use the same user's local Maven repository and a compiler compatib
 
 ## Configure a session
 
-Inside a `VpnService` subclass, after obtaining consent, starting the foreground service and establishing the TUN FD:
+Build reusable configuration separately, then start a session inside a `VpnService` subclass after obtaining consent, starting the foreground service and establishing the TUN FD:
 
 ```kotlin
 import com.dylenpoki.dyltun.BodyLimit
@@ -82,11 +82,12 @@ import com.dylenpoki.dyltun.HttpFlow
 import com.dylenpoki.dyltun.HttpHeaders
 import com.dylenpoki.dyltun.HttpHooks
 import com.dylenpoki.dyltun.HttpResponse
-import com.dylenpoki.dyltun.MqttInspector
-import com.dylenpoki.dyltun.TlsClientHelloInspector
+import com.dylenpoki.dyltun.Endpoint
+import com.dylenpoki.dyltun.RoutingDecision
 import com.dylenpoki.dyltun.dyltun
+import com.dylenpoki.dyltun.dyltunConfig
 
-session = dyltun(fd) {
+val config = dyltunConfig {
     hooks = object : HttpHooks {
         override fun request(flow: HttpFlow) {
             if (flow.request.path == "/local-health") {
@@ -109,21 +110,21 @@ session = dyltun(fd) {
         maxTotalBufferedBytes = 32L * 1024 * 1024
     )
 
-    protocols {
-        install(TlsClientHelloInspector())
-        install(MqttInspector())
-    }
-
     routing {
-        tlsSni(listOf("blocked.example.com", "blocked.example.org"), includeSubdomains = true) {
-            reset()
-        }
-        mqtt { redirect("127.0.0.1", 1883) }
+        tlsSni(
+            domains = listOf("blocked.example.com", "blocked.example.org"),
+            includeSubdomains = true,
+            action = RoutingDecision.Reset
+        )
+        mqtt(action = RoutingDecision.Redirect(Endpoint("127.0.0.1", 1883)))
     }
 }
+
+// Inside VpnService, once fd has been established:
+session = dyltun(fd, config)
 ```
 
-All four configuration sections are optional. Use `dyltun(fd)` for forwarding without HTTP hooks. MQTT redirection requires a broker already listening at the configured endpoint; the sample does not include a broker.
+The root configuration offers optional `hooks`, `bodyLimits`, `protocols` and `routing`. These value-action TLS/MQTT rules supply default inspectors; explicit `protocols { install(...) }` registrations take precedence. Use `rule { context -> ... }` for custom routing. The existing inline `dyltun(fd) { ... }`, nullable Hooks overload and action-lambda routing remain supported. Use `dyltun(fd)` for forwarding without HTTP hooks. MQTT redirection requires a broker already listening at the configured endpoint; the sample does not include a broker.
 
 The returned session owns the FD. Call `session.close()` when stopping, revoking or destroying the VPN; use `awaitClosed()` from a coroutine if full cleanup must complete. A synchronous configuration failure leaves the FD with the caller. See the compiled [full configuration example](sample/src/main/kotlin/com/dylenpoki/dyltun/sample/FullApiExample.kt) and runnable [VPN service](sample/src/main/kotlin/com/dylenpoki/dyltun/sample/DemoVpnService.kt).
 
@@ -148,6 +149,8 @@ The detailed guides are currently in Chinese; Kotlin API names and examples are 
 | [Building](docs/BUILDING.md) | Toolchain, build/test commands and sample usage |
 | [Implementation status](docs/IMPLEMENTATION.md) | Implemented behavior, resource limits and verification |
 | [Design](docs/DESIGN.md) | Architecture and runtime contracts |
+| [Flow diagrams](docs/FLOW.md) | Startup, packet forwarding, HTTP transactions and ownership |
+| [Refactoring](docs/REFACTORING.md) | Compatibility constraints and the simplification results |
 | [Roadmap](docs/ROADMAP.md) | Remaining work and acceptance criteria |
 | [Changelog](CHANGELOG.md) | Software changes and unreleased fixes |
 | [Design history](docs/DESIGN_HISTORY.md) | Earlier design decisions |

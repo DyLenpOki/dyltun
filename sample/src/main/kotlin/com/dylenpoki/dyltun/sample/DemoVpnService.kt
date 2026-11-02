@@ -10,16 +10,13 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.dylenpoki.dyltun.ConnectionRule
 import com.dylenpoki.dyltun.DyltunSession
 import com.dylenpoki.dyltun.DyltunState
 import com.dylenpoki.dyltun.Endpoint
-import com.dylenpoki.dyltun.MqttInspector
-import com.dylenpoki.dyltun.RoutingContext
 import com.dylenpoki.dyltun.RoutingDecision
-import com.dylenpoki.dyltun.TlsClientHelloInspector
 import com.dylenpoki.dyltun.TransportProtocol
 import com.dylenpoki.dyltun.dyltun
+import com.dylenpoki.dyltun.dyltunConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,6 +29,23 @@ class DemoVpnService : VpnService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val main = Handler(Looper.getMainLooper())
     private val monitors = mutableListOf<Job>()
+    private val config = dyltunConfig {
+        hooks = DemoHttpHooks
+        routing {
+            tlsSni(listOf("blocked.example.com"), includeSubdomains = true, action = RoutingDecision.Reset)
+            mqtt(action = RoutingDecision.Redirect(Endpoint("127.0.0.1", 1883)))
+            rule { context ->
+                when {
+                    context.connection.destinationPort == 53 ->
+                        RoutingDecision.Redirect(Endpoint("1.1.1.1", 53))
+                    context.connection.transport == TransportProtocol.TCP && context.connection.destinationPort == 80 ->
+                        RoutingDecision.Redirect(Endpoint("example.com", 80))
+                    context.connection.transport == TransportProtocol.UDP -> RoutingDecision.Drop
+                    else -> RoutingDecision.Redirect(Endpoint("1.1.1.1", 443))
+                }
+            }
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -44,23 +58,7 @@ class DemoVpnService : VpnService() {
                 .addAddress("10.77.0.1", 32).addRoute("198.18.0.1", 32).establish()
                 ?: error("VPN permission was revoked")
             val active = try {
-                dyltun(fd) {
-                    hooks = DemoHttpHooks
-                    protocols { install(TlsClientHelloInspector()); install(MqttInspector()) }
-                    routing {
-                        tlsSni("blocked.example.com", includeSubdomains = true) { reset() }
-                        mqtt { redirect("127.0.0.1", 1883) }
-                        rule(object : ConnectionRule {
-                            override fun evaluate(context: RoutingContext): RoutingDecision =
-                                if (context.connection.destinationPort == 53) {
-                                    RoutingDecision.Redirect(Endpoint("1.1.1.1", 53))
-                                } else if (context.connection.transport == TransportProtocol.TCP && context.connection.destinationPort == 80) {
-                                    RoutingDecision.Redirect(Endpoint("example.com", 80))
-                                } else if (context.connection.transport == TransportProtocol.UDP) RoutingDecision.Drop
-                                else RoutingDecision.Redirect(Endpoint("1.1.1.1", 443))
-                        })
-                    }
-                }
+                dyltun(fd, config)
             } catch (error: Throwable) {
                 fd.close(); throw error
             }

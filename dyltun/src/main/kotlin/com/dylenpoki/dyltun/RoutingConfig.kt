@@ -39,10 +39,14 @@ class TcpActionBuilder internal constructor() {
     internal fun build(): RoutingDecision = checkNotNull(decision) { "Routing action is missing" }
 }
 
-class RoutingConfig private constructor(val rules: List<ConnectionRule>) {
+class RoutingConfig private constructor(
+    val rules: List<ConnectionRule>,
+    internal val defaultInspectors: Set<ProtocolId>
+) {
     @DyltunDsl
     class Builder internal constructor() {
         private val rules = mutableListOf<ConnectionRule>()
+        private val defaultInspectors = linkedSetOf<ProtocolId>()
 
         fun tlsSni(
             domain: String,
@@ -55,11 +59,25 @@ class RoutingConfig private constructor(val rules: List<ConnectionRule>) {
             domains: Iterable<String>,
             includeSubdomains: Boolean = false,
             action: TcpActionBuilder.() -> Unit
+        ) = addTlsRule(domains, includeSubdomains) { TcpActionBuilder().apply(action).build() }
+
+        /** Value-action shorthand; installs the default TLS inspector only when none was supplied. */
+        fun tlsSni(
+            domains: Iterable<String>,
+            includeSubdomains: Boolean = false,
+            action: RoutingDecision
+        ) {
+            addTlsRule(domains, includeSubdomains) { requireTcpAction(action) }
+            defaultInspectors += ProtocolId.TLS
+        }
+
+        private fun addTlsRule(
+            domains: Iterable<String>, includeSubdomains: Boolean, action: () -> RoutingDecision
         ) {
             val expected = domains.map(::canonicalDomain).toSet()
             require(expected.isNotEmpty()) { "At least one TLS SNI domain is required" }
             val suffixes = if (includeSubdomains) expected.map { ".$it" } else emptyList()
-            val decision = TcpActionBuilder().apply(action).build()
+            val decision = action()
             rule(object : ConnectionRule {
                 override val requiredProtocols = setOf(ProtocolId.TLS)
                 override fun evaluate(context: RoutingContext): RoutingDecision {
@@ -73,8 +91,16 @@ class RoutingConfig private constructor(val rules: List<ConnectionRule>) {
             })
         }
 
-        fun mqtt(action: TcpActionBuilder.() -> Unit) {
-            val decision = TcpActionBuilder().apply(action).build()
+        fun mqtt(action: TcpActionBuilder.() -> Unit) =
+            addMqttRule(TcpActionBuilder().apply(action).build())
+
+        /** Value-action shorthand; installs the default MQTT inspector only when none was supplied. */
+        fun mqtt(action: RoutingDecision) {
+            addMqttRule(requireTcpAction(action))
+            defaultInspectors += ProtocolId.MQTT
+        }
+
+        private fun addMqttRule(decision: RoutingDecision) {
             rule(object : ConnectionRule {
                 override val requiredProtocols = setOf(ProtocolId.MQTT)
                 override fun evaluate(context: RoutingContext): RoutingDecision =
@@ -92,7 +118,28 @@ class RoutingConfig private constructor(val rules: List<ConnectionRule>) {
             }
         }
 
-        internal fun build(): RoutingConfig = RoutingConfig(Collections.unmodifiableList(ArrayList(rules)))
+        fun rule(
+            requiredProtocols: Set<ProtocolId> = emptySet(),
+            evaluate: (RoutingContext) -> RoutingDecision
+        ) {
+            val dependencies = requiredProtocols
+            rule(object : ConnectionRule {
+                override val requiredProtocols = dependencies
+                override fun evaluate(context: RoutingContext): RoutingDecision = evaluate.invoke(context)
+            })
+        }
+
+        private fun requireTcpAction(action: RoutingDecision): RoutingDecision {
+            require(action == RoutingDecision.Forward || action == RoutingDecision.Reset || action is RoutingDecision.Redirect) {
+                "A TCP action must be Forward, Reset or Redirect"
+            }
+            return action
+        }
+
+        internal fun build(): RoutingConfig = RoutingConfig(
+            Collections.unmodifiableList(ArrayList(rules)),
+            Collections.unmodifiableSet(LinkedHashSet(defaultInspectors))
+        )
     }
 }
 

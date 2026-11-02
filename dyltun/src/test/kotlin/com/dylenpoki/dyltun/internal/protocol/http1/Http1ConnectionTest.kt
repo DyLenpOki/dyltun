@@ -345,6 +345,75 @@ class Http1ConnectionTest {
         assertEquals(1, connector.closed)
     }
 
+    @Test fun upstreamEofAfterCompleteInterimResponseCanRecover() = runBlocking {
+        var responses = 0
+        var errors = 0
+        val connector = FakeConnector("HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n".toByteArray())
+        val hooks = object : HttpHooks {
+            override fun error(flow: HttpFlow, cause: Throwable) {
+                assertTrue(cause is java.io.EOFException)
+                errors++
+                flow.response = HttpResponse.make(503, "offline")
+            }
+            override fun response(flow: HttpFlow) { responses++ }
+        }
+        val wire = run(config(hooks), "GET / HTTP/1.1\r\nHost: e.com\r\n\r\n".toByteArray(), connector)
+        val input = source(wire)
+        assertEquals(103, HttpFraming.response(input, "GET").status)
+        val final = HttpFraming.response(input, "GET")
+        assertEquals(503, final.status)
+        assertEquals("offline", body(input, final.framing).toString(Charsets.UTF_8))
+        assertEquals(1, errors)
+        assertEquals(1, responses)
+        assertEquals(1, connector.closed)
+    }
+
+    @Test fun upgradedUpstreamFailureCannotAppendHttpFallback(): Unit = runBlocking {
+        var errors = 0
+        var responses = 0
+        var closed = 0
+        val failure = IOException("upgraded peer reset")
+        val hooks = object : HttpHooks {
+            override fun response(flow: HttpFlow) { responses++ }
+            override fun error(flow: HttpFlow, cause: Throwable) {
+                errors++
+                flow.response = HttpResponse.make(503, "must not appear")
+            }
+        }
+        val connector = HttpConnector {
+            var sent = false
+            object : HttpPeer {
+                override val source = ByteSource {
+                    if (sent) throw failure
+                    sent = true
+                    "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n".toByteArray()
+                }
+                override val sink = ByteSink {}
+                override fun finish() {}
+                override fun close() { closed++ }
+            }
+        }
+        val output = ByteArrayOutputStream()
+        val budget = MemoryBudget(100000)
+        val thrown = assertThrows(IOException::class.java) {
+            runBlocking {
+                HookExecutor().use { executor ->
+                    Http1Connection(config(hooks), connection(), emptyList(), budget, executor, connector,
+                        sourceChunks("GET / HTTP/1.1\r\nHost: e.com\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n".toByteArray()),
+                        ByteSink { output.write(it) }).run()
+                }
+            }
+        }
+        assertTrue(generateSequence<Throwable>(thrown) { it.cause }.any { it === failure })
+        val input = source(output.toByteArray())
+        assertEquals(101, HttpFraming.response(input, "GET").status)
+        assertEquals(null, input.read())
+        assertEquals(0, errors)
+        assertEquals(1, responses)
+        assertEquals(1, closed)
+        assertEquals(0L, budget.used)
+    }
+
     @Test fun requestAndResponseHookIoErrorsAreNeverOfferedForRecovery(): Unit = runBlocking {
         for (failRequest in listOf(true, false)) {
             var errors = 0

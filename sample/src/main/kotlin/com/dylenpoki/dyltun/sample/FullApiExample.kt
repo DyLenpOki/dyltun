@@ -5,17 +5,17 @@ import android.os.ParcelFileDescriptor
 import com.dylenpoki.dyltun.BodyLimit
 import com.dylenpoki.dyltun.BodyLimits
 import com.dylenpoki.dyltun.DyltunSession
+import com.dylenpoki.dyltun.Endpoint
 import com.dylenpoki.dyltun.HttpFlow
 import com.dylenpoki.dyltun.HttpHeaders
 import com.dylenpoki.dyltun.HttpHooks
 import com.dylenpoki.dyltun.HttpResponse
-import com.dylenpoki.dyltun.MqttInspector
-import com.dylenpoki.dyltun.TlsClientHelloInspector
+import com.dylenpoki.dyltun.RoutingDecision
 import com.dylenpoki.dyltun.dyltun
+import com.dylenpoki.dyltun.dyltunConfig
 
-/** Complete API example, including optional HTTP hooks, body limits and protocol routing. */
-@Suppress("unused")
-internal fun VpnService.fullApiExample(fd: ParcelFileDescriptor): DyltunSession = dyltun(fd) {
+/** Reusable configuration, independent of the Android service and its descriptor. */
+private val fullConfig = dyltunConfig {
     hooks = object : HttpHooks {
         override fun request(flow: HttpFlow) {
             if (flow.request.path == "/local-health") {
@@ -30,9 +30,16 @@ internal fun VpnService.fullApiExample(fd: ParcelFileDescriptor): DyltunSession 
         response = BodyLimit(2L * 1024 * 1024, 8L * 1024 * 1024),
         maxTotalBufferedBytes = 32L * 1024 * 1024
     )
-    protocols { install(TlsClientHelloInspector()); install(MqttInspector()) }
     routing {
-        tlsSni(listOf("blocked.example.com", "blocked.example.org"), includeSubdomains = true) { reset() }
-        mqtt { redirect("127.0.0.1", 1883) }
+        tlsSni(
+            domains = listOf("blocked.example.com", "blocked.example.org"),
+            includeSubdomains = true,
+            action = RoutingDecision.Reset
+        )
+        mqtt(action = RoutingDecision.Redirect(Endpoint("127.0.0.1", 1883)))
     }
 }
+
+/** The host only needs to supply an established TUN descriptor. */
+@Suppress("unused")
+internal fun VpnService.fullApiExample(fd: ParcelFileDescriptor): DyltunSession = dyltun(fd, fullConfig)

@@ -6,6 +6,7 @@
 
 ## 0.1.0-SNAPSHOT 开始实现（2026-11-02，未发布）
 
+- 兼容性简化：新增独立 dyltunConfig 工厂与配置启动重载；TLS 域名集合/MQTT 值动作规则补齐默认识别器，显式注册优先；新增 lambda rule。HTTP 编排拆成连接、单次事务和响应输出，保持协议、预算和线程归属契约。具体计划与验证见 [REFACTORING.md](REFACTORING.md)。
 - 修复普通 HTTP 请求发送结束后提前 shutdownOutput/FIN 的问题：使用 HTTP framing 标识消息结束，等待响应后关闭本笔上游 Socket，避免 IIS/ARR 等前端提前中止请求并返回 400 或 EOF；101 原始流仍支持真实半关闭。新增 GET/POST 回归，并修正真实 Socket 测试以 HTTP framing 读取请求。
 - 为宿主迁移上游错误回退，新增默认空实现 HttpHooks.error(flow, cause)；仅在最终响应提交前的上游 I/O/响应 EOF 故障中允许设置有界本地响应，并保持原始错误诊断。拒绝策略、Hook/协议错误、取消与已提交响应不进入回退。
 - 库 namespace 与 Kotlin 包统一为 com.dylenpoki.dyltun，示例使用 com.dylenpoki.dyltun.sample，Maven 坐标更新为 com.dylenpoki:dyltun:0.1.0-SNAPSHOT；接入方需同步修改 imports 与依赖。

@@ -8,7 +8,7 @@
 
 **当前状态：实验性版本 `0.1.0-SNAPSHOT`，API 可能调整。** IPv4 TCP/UDP、明文 HTTP/1.1 修改与本地响应已接通，TLS SNI 阻断和 MQTT 重定向已参与实际运行。尚未完成多版本真机、长期负载与稳定版本验收。
 
-支持 request/response Hooks、HttpResponse.make、上游失败时的 error Hook 回退、identity/gzip、Body 方向/总预算及超限流式回退。114 项 JVM 测试已通过；此前 7 项 API 34 Android 测试通过，真实 VPN 验证 TCP/UDP DNS 和 HTTP 本地响应。实现范围、资源上限和验证见 [IMPLEMENTATION.md](docs/IMPLEMENTATION.md)。
+支持 request/response Hooks、HttpResponse.make、上游失败时的 error Hook 回退、identity/gzip、Body 方向/总预算及超限流式回退。本轮 124 项 JVM 测试和 8 项 API 34 Android 测试通过；此前真实 VPN 验证 TCP/UDP DNS 和 HTTP 本地响应。实现范围、资源上限和验证见 [IMPLEMENTATION.md](docs/IMPLEMENTATION.md)。
 
 接入自己的 Android 应用，请从 [API 使用文档](docs/API.md) 开始，包含依赖配置、VpnService 初始化和可复制的调用示例。
 
@@ -33,6 +33,7 @@ Linux/macOS 将 `.\gradlew.bat` 换成 `bash ./gradlew`。先配置 Android SDK�
 |---|---|---|
 | [API.md](docs/API.md) | 接入指南、HTTP 修改与本地响应、Body 限额、路由、Session 和扩展接口 | 将模块接入自己的 Android 应用 |
 | [DESIGN.md](docs/DESIGN.md) | 模块职责、数据路径、生命周期、HTTP 与路由行为 | 理解和实现内部逻辑 |
+| [FLOW.md](docs/FLOW.md) | 初始化、TCP/UDP 数据流、HTTP Hooks 和资源归属流程图 | 对照代码理解运行过程 |
 | [ROADMAP.md](docs/ROADMAP.md) | 实施顺序、依赖关系、阶段验收清单 | 按阶段执行和核对进度 |
 | [CHANGELOG.md](CHANGELOG.md) | 软件变更与尚未发布的内容 | 查看功能和修复记录 |
 | [DESIGN_HISTORY.md](docs/DESIGN_HISTORY.md) | 设计版本和决策变化 | 对照历史决定 |
@@ -45,13 +46,23 @@ Linux/macOS 将 `.\gradlew.bat` 换成 `bash ./gradlew`。先配置 Android SDK�
 
 ## 完整配置示例
 
-根配置始终包括四部分：`hooks`、`bodyLimits`、`protocols`、`routing`。后两者用于协议识别和连接决策，与 HTTP 内容修改分工明确。
+根配置提供四个可选入口：`hooks`、`bodyLimits`、`protocols`、`routing`。用 `dyltunConfig {}` 在服务之外构造配置，服务内只需 `dyltun(fd, config)`。内置规则使用 `action = ...` 时自动补齐默认识别器；需要自定义识别器时再使用 `protocols`。
 
 下面完整示例已参与编译，四项入口均已接入运行时。可运行宿主见 [DemoVpnService.kt](sample/src/main/kotlin/com/dylenpoki/dyltun/sample/DemoVpnService.kt)，Hooks 示例见 [DemoHttpHooks.kt](sample/src/main/kotlin/com/dylenpoki/dyltun/sample/DemoHttpHooks.kt)。
 
 ```kotlin
-// 位于 VpnService 子类；fd 来自 Builder.establish()。
-session = dyltun(fd) {
+import com.dylenpoki.dyltun.BodyLimit
+import com.dylenpoki.dyltun.BodyLimits
+import com.dylenpoki.dyltun.Endpoint
+import com.dylenpoki.dyltun.HttpFlow
+import com.dylenpoki.dyltun.HttpHeaders
+import com.dylenpoki.dyltun.HttpHooks
+import com.dylenpoki.dyltun.HttpResponse
+import com.dylenpoki.dyltun.RoutingDecision
+import com.dylenpoki.dyltun.dyltun
+import com.dylenpoki.dyltun.dyltunConfig
+
+val config = dyltunConfig {
     hooks = object : HttpHooks {
         override fun request(flow: HttpFlow) {
             if (flow.request.path == "/local-health") {
@@ -83,20 +94,18 @@ session = dyltun(fd) {
         maxTotalBufferedBytes = 32L * 1024 * 1024
     )
 
-    protocols {
-        install(TlsClientHelloInspector())
-        install(MqttInspector())
-    }
-
     routing {
-        tlsSni(listOf("blocked.example.com", "blocked.example.org"), includeSubdomains = true) {
-            reset()
-        }
-        mqtt {
-            redirect("127.0.0.1", 1883)
-        }
+        tlsSni(
+            domains = listOf("blocked.example.com", "blocked.example.org"),
+            includeSubdomains = true,
+            action = RoutingDecision.Reset
+        )
+        mqtt(action = RoutingDecision.Redirect(Endpoint("127.0.0.1", 1883)))
     }
 }
+
+// 位于 VpnService 子类；fd 来自 Builder.establish()。
+session = dyltun(fd, config)
 ```
 
 `TlsClientHelloInspector` 和 `MqttInspector` 提取可见的 SNI / MQTT CONNECT 元信息，在打开上游连接前执行 RST 或重定向。探测最多 65,535 字节/1 秒；不完整或未知协议默认转发。ECH、无 SNI、QUIC、MQTTS 不保证识别，也不提供 HTTPS 解密或 MQTT 消息修改。
@@ -104,6 +113,8 @@ session = dyltun(fd) {
 ## 简单调用与宿主职责
 
 无需内容处理时调用 `dyltun(fd)`。已有 Hooks 对象时使用 `dyltun(fd) { hooks = httpHooks }`，或使用两参数简写 `dyltun(fd, httpHooks)`。
+
+原有行内 DSL 和路由动作块保持兼容。通用规则可用 `rule { context -> ... }`；`ConnectionRule` 扩展接口继续保留。配置复用与内部 HTTP 职责拆分见 [简化记录](docs/REFACTORING.md)。
 
 宿主负责 VPN 授权、前台服务、TUN 地址、路由和应用排除规则。库接管 FD 后负责转发及资源管理。宿主在停止、撤销或销毁 VPN 时调用 `session.close()`；完整关闭语义见 DESIGN.md。
 
