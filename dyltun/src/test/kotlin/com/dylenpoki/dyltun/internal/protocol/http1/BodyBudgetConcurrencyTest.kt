@@ -1,5 +1,9 @@
 package com.dylenpoki.dyltun.internal.protocol.http1
 
+import com.dylenpoki.dyltun.internal.stream.ByteSink
+import com.dylenpoki.dyltun.internal.stream.ByteSource
+import com.dylenpoki.dyltun.internal.stream.CHUNK_BYTES
+import com.dylenpoki.dyltun.internal.stream.StreamConnector
 import com.dylenpoki.dyltun.BodyLimit
 import com.dylenpoki.dyltun.BodyLimitExceededException
 import com.dylenpoki.dyltun.BodyLimits
@@ -98,7 +102,7 @@ class BodyBudgetConcurrencyTest {
         var position = 0
         val input = "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 8\r\nConnection: close\r\n\r\n12345678".toByteArray()
         val info = ConnectionInfo(id, TransportProtocol.TCP, InetAddress.getByName("10.0.0.1"), id.toInt() + 1000, InetAddress.getByName("198.51.100.1"), 80)
-        return Http1Connection(config, info, emptyList(), budget, hooks, HttpConnector { error("Local/rejected response opened upstream") },
+        return Http1Connection(config, info, emptyList(), budget, hooks, StreamConnector { error("Local/rejected response opened upstream") },
             ByteSource { if (position == input.size) null else input.copyOfRange(position, minOf(input.size, position + CHUNK_BYTES)).also { position += it.size } },
             ByteSink { output.write(it) })
     }

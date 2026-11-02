@@ -885,6 +885,7 @@ suspend fun closeSession(session: DyltunSession) {
 
 - 数据面仅支持 IPv4 TCP/UDP；IPv6 和其他 IP 协议不会正常转发，不提供完整 ICMP、PMTU 与网络切换迁移。仅设置 IPv4 路由不能视为对 IPv6 流量的完整 VPN 保护。
 - HTTP/2、HTTP/3、HTTPS 内容修改不受支持；未知 TCP 协议按普通字节流转发。
+- 公共扩展为 ProtocolInspector 与 ConnectionRule。内部已拆出 TCP 处理器选择与生命周期边界，但没有公共内容处理器注册 API；本轮也未增加 MQTT 消息修改。维护者扩展说明见 [STREAM_PROCESSORS.md](STREAM_PROCESSORS.md)。
 - HTTP/1.1 客户端连接支持 keep-alive 与按序处理 pipelining，但每笔事务单独建立上游连接，没有上游连接池。
 - HTTP 解析当前限制单行 8 KiB、头部区 32 KiB、最多 128 个字段；这些不是公开可调配置。Hop-by-hop Header 会规范化，不能依赖其原样保留。
 - 主机名解析当前可能阻塞网络选择器工作线程；高并发与长期真机性能仍需验证。

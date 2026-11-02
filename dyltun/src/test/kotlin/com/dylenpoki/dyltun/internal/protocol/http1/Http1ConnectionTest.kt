@@ -1,5 +1,10 @@
 package com.dylenpoki.dyltun.internal.protocol.http1
 
+import com.dylenpoki.dyltun.internal.stream.ByteSink
+import com.dylenpoki.dyltun.internal.stream.ByteSource
+import com.dylenpoki.dyltun.internal.stream.CHUNK_BYTES
+import com.dylenpoki.dyltun.internal.stream.StreamConnector
+import com.dylenpoki.dyltun.internal.stream.StreamPeer
 import com.dylenpoki.dyltun.BodyLimit
 import com.dylenpoki.dyltun.BodyLimitExceededException
 import com.dylenpoki.dyltun.BodyLimits
@@ -44,8 +49,8 @@ class Http1ConnectionTest {
             var halfClosed = false
             var replied = false
             val received = ByteArrayOutputStream()
-            val connector = HttpConnector {
-                object : HttpPeer {
+            val connector = StreamConnector {
+                object : StreamPeer {
                     override val source = ByteSource {
                         // Some HTTP frontends abort processing when the client sends an early FIN.
                         if (halfClosed || replied) null else {
@@ -264,7 +269,7 @@ class Http1ConnectionTest {
         HookExecutor().use { executor ->
             withTimeout(1000) {
                 Http1Connection(cfg, connection(), emptyList(), MemoryBudget(100000), executor,
-                    HttpConnector { object : HttpPeer {
+                    StreamConnector { object : StreamPeer {
                         override val source = ByteSource { if (delivered) null else final.also { delivered = true } }
                         override val sink = ByteSink {}
                         override fun finish() {}
@@ -325,7 +330,7 @@ class Http1ConnectionTest {
             }
         }
         val wire = run(config(hooks), ("GET /one HTTP/1.1\r\nHost: e.com\r\n\r\n" +
-            "GET /two HTTP/1.1\r\nHost: e.com\r\n\r\n").toByteArray(), HttpConnector { throw failure })
+            "GET /two HTTP/1.1\r\nHost: e.com\r\n\r\n").toByteArray(), StreamConnector { throw failure })
         assertEquals(listOf("request:1", "error:1", "response:1"), calls)
         assertTrue(wire.toString(Charsets.UTF_8).contains("Connection: close\r\n"))
         assertTrue(wire.toString(Charsets.UTF_8).endsWith("fallback"))
@@ -380,9 +385,9 @@ class Http1ConnectionTest {
                 flow.response = HttpResponse.make(503, "must not appear")
             }
         }
-        val connector = HttpConnector {
+        val connector = StreamConnector {
             var sent = false
-            object : HttpPeer {
+            object : StreamPeer {
                 override val source = ByteSource {
                     if (sent) throw failure
                     sent = true
@@ -438,9 +443,9 @@ class Http1ConnectionTest {
         val hooks = object : HttpHooks {
             override fun error(flow: HttpFlow, cause: Throwable) { errors++; flow.response = HttpResponse.make() }
         }
-        val connector = HttpConnector {
+        val connector = StreamConnector {
             var first = true
-            object : HttpPeer {
+            object : StreamPeer {
                 override val source = ByteSource {
                     if (first) { first = false; "HTTP/1.1 200 OK\r\nContent-Length: 999\r\n\r\n".toByteArray() }
                     else throw IOException("upstream reset")
@@ -463,7 +468,7 @@ class Http1ConnectionTest {
         }
         assertThrows(BodyLimitExceededException::class.java) {
             runBlocking { run(config(hooks, BodyLimits(response = BodyLimit(4, 4))),
-                "GET / HTTP/1.1\r\nHost: e.com\r\n\r\n".toByteArray(), HttpConnector { throw IOException("offline") }) }
+                "GET / HTTP/1.1\r\nHost: e.com\r\n\r\n".toByteArray(), StreamConnector { throw IOException("offline") }) }
         }
     }
 
@@ -471,12 +476,12 @@ class Http1ConnectionTest {
         val failure = IOException("offline")
         val thrown = assertThrows(IOException::class.java) {
             runBlocking { run(config(object : HttpHooks {}), "GET / HTTP/1.1\r\nHost: e.com\r\n\r\n".toByteArray(),
-                HttpConnector { throw failure }) }
+                StreamConnector { throw failure }) }
         }
         assertTrue(generateSequence<Throwable>(thrown) { it.cause }.any { it === failure })
     }
 
-    private suspend fun run(config: DyltunConfig, bytes: ByteArray, connector: HttpConnector): ByteArray {
+    private suspend fun run(config: DyltunConfig, bytes: ByteArray, connector: StreamConnector): ByteArray {
         val output = ByteArrayOutputStream()
         val budget = MemoryBudget(config.bodyLimits.maxTotalBufferedBytes)
         try {
@@ -497,16 +502,16 @@ class Http1ConnectionTest {
     private suspend fun all(reader: BodyReader): ByteArray = ByteArrayOutputStream().also { output -> while (true) { output.write(reader.read() ?: break) } }.toByteArray()
     private fun gzip(bytes: ByteArray): ByteArray = ByteArrayOutputStream().also { out -> GZIPOutputStream(out).use { it.write(bytes) } }.toByteArray()
 
-    private inner class FakeConnector(private val response: ByteArray = byteArrayOf()) : HttpConnector {
+    private inner class FakeConnector(private val response: ByteArray = byteArrayOf()) : StreamConnector {
         val requests = mutableListOf<ByteArrayOutputStream>()
         val destinations = mutableListOf<Endpoint>()
         var closed = 0
-        override fun open(endpoint: Endpoint): HttpPeer {
+        override fun open(endpoint: Endpoint): StreamPeer {
             destinations += endpoint
             val request = ByteArrayOutputStream().also { requests += it }
             val sent = CompletableDeferred<Unit>()
             var position = 0
-            return object : HttpPeer {
+            return object : StreamPeer {
                 override val source = ByteSource {
                     sent.await()
                     if (position == response.size) null else response.copyOfRange(position, minOf(response.size, position + CHUNK_BYTES)).also { position += it.size }

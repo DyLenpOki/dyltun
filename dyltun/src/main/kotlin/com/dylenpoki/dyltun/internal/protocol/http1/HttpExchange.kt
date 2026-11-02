@@ -1,5 +1,7 @@
 package com.dylenpoki.dyltun.internal.protocol.http1
 
+import com.dylenpoki.dyltun.internal.stream.StreamConnector
+import com.dylenpoki.dyltun.internal.stream.StreamPeer
 import com.dylenpoki.dyltun.BodyState
 import com.dylenpoki.dyltun.ConnectionInfo
 import com.dylenpoki.dyltun.DyltunConfig
@@ -31,7 +33,7 @@ internal class HttpExchange(
     private val connection: ConnectionInfo,
     private val metadata: List<ProtocolMetadata>,
     private val executor: HookExecutor,
-    private val connector: HttpConnector,
+    private val connector: StreamConnector,
     private val client: HttpClient,
     private val responses: HttpResponseWriter,
     private val flowIds: AtomicLong,
@@ -125,7 +127,7 @@ internal class HttpExchange(
     }
 
     private suspend fun writeRequestHead(
-        prepared: PreparedRequest, peer: HttpPeer, account: BodyAccount
+        prepared: PreparedRequest, peer: StreamPeer, account: BodyAccount
     ): List<ByteArray>? {
         val request = prepared.flow.request
         val chunks = if (request.bodyState == BodyState.BUFFERED) {
@@ -187,7 +189,7 @@ internal class HttpExchange(
     }
 
     private suspend fun upgrade(
-        request: PreparedRequest, head: ResponseHead, peer: HttpPeer, upstream: HttpInput, account: BodyAccount
+        request: PreparedRequest, head: ResponseHead, peer: StreamPeer, upstream: HttpInput, account: BodyAccount
     ): ExchangeResult {
         val requestedHeaders = request.flow.request.headers
         val protocol = requestedHeaders["Upgrade"]
@@ -213,7 +215,7 @@ internal class HttpExchange(
         return ExchangeResult.UPGRADED
     }
 
-    private suspend fun tunnel(peer: HttpPeer, upstream: HttpInput) = coroutineScope {
+    private suspend fun tunnel(peer: StreamPeer, upstream: HttpInput) = coroutineScope {
         val upload = launch {
             while (true) peer.sink.write(client.input.read() ?: break)
             peer.finish()

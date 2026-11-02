@@ -150,6 +150,7 @@ The detailed guides are currently in Chinese; Kotlin API names and examples are 
 | [Implementation status](docs/IMPLEMENTATION.md) | Implemented behavior, resource limits and verification |
 | [Design](docs/DESIGN.md) | Architecture and runtime contracts |
 | [Flow diagrams](docs/FLOW.md) | Startup, packet forwarding, HTTP transactions and ownership |
+| [Stream processors](docs/STREAM_PROCESSORS.md) | Internal TCP handler selection, backpressure and lifecycle contracts |
 | [Refactoring](docs/REFACTORING.md) | Compatibility constraints and the simplification results |
 | [Roadmap](docs/ROADMAP.md) | Remaining work and acceptance criteria |
 | [Changelog](CHANGELOG.md) | Software changes and unreleased fixes |

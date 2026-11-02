@@ -14,7 +14,9 @@ import com.dylenpoki.dyltun.internal.android.StreamConnector
 import com.dylenpoki.dyltun.internal.packet.Ipv4Packet
 import com.dylenpoki.dyltun.internal.packet.Ipv4Reassembler
 import com.dylenpoki.dyltun.internal.packet.PacketWriter
-import com.dylenpoki.dyltun.internal.protocol.http1.HttpRuntime
+import com.dylenpoki.dyltun.internal.protocol.http1.HttpStreamHandler
+import com.dylenpoki.dyltun.internal.stream.StreamHandler
+import com.dylenpoki.dyltun.internal.stream.StreamRuntime
 import com.dylenpoki.dyltun.internal.transport.TcpForwarder
 import com.dylenpoki.dyltun.internal.transport.UdpForwarder
 import com.dylenpoki.dyltun.internal.transport.UdpReply
@@ -32,7 +34,10 @@ internal class IpPacketRuntime(
     private val config: DyltunConfig,
     private val connector: DatagramConnector,
     private val emit: (DyltunEvent) -> Unit,
-    private val streamConnector: StreamConnector
+    private val streamConnector: StreamConnector,
+    private val createHandlers: () -> List<StreamHandler> = {
+        if (config.hooks != null) listOf(HttpStreamHandler(config)) else emptyList()
+    }
 ) : SessionRuntime {
     private val stopped = AtomicBoolean()
     private val failure = AtomicReference<Throwable?>()
@@ -45,7 +50,7 @@ internal class IpPacketRuntime(
     @Volatile private var forwarder: UdpForwarder? = null
     @Volatile private var tcpForwarder: TcpForwarder? = null
     private var tcpRelay: TcpRelay? = null
-    @Volatile private var httpRuntime: HttpRuntime? = null
+    @Volatile private var streamRuntime: StreamRuntime? = null
 
     override fun run(onReady: () -> Unit) {
         val udp = UdpForwarder(connector, { reply ->
@@ -63,9 +68,10 @@ internal class IpPacketRuntime(
         })
         tcpForwarder = tcp
         tcp.start()
-        val http = if (config.hooks != null) HttpRuntime(config, tcp, device::wakeup,
-            { connection, error -> emit(DyltunEvent.ConnectionError(connection, error)) }).also { httpRuntime = it } else null
-        val relay = TcpRelay(config, tcp, device::write, emit, { ++nextConnection }, { packetId++ }, http = http)
+        val streams = StreamRuntime(config.protocols, tcp, device::wakeup,
+            { connection, error -> emit(DyltunEvent.ConnectionError(connection, error)) }, createHandlers())
+        streamRuntime = streams
+        val relay = TcpRelay(config, streams, device::write, emit, { ++nextConnection }, { packetId++ })
         tcpRelay = relay
         val buffer = ByteArray(65535)
         onReady()
@@ -140,14 +146,14 @@ internal class IpPacketRuntime(
         stopped.set(true)
         forwarder?.requestStop()
         tcpForwarder?.requestStop()
-        httpRuntime?.requestStop()
+        streamRuntime?.requestStop()
         device.requestStop()
     }
 
     override fun close() {
         requestStop()
         var failure: Throwable? = null
-        for (resource in listOfNotNull(forwarder, tcpForwarder, tcpRelay, httpRuntime, device, fragments)) {
+        for (resource in listOfNotNull(forwarder, tcpForwarder, tcpRelay, streamRuntime, device, fragments)) {
             try { resource.close() } catch (error: Throwable) {
                 val previous = failure
                 if (previous == null) failure = error else if (previous !== error) previous.addSuppressed(error)

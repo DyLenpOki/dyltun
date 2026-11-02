@@ -12,6 +12,11 @@ import com.dylenpoki.dyltun.HttpFlow
 import com.dylenpoki.dyltun.HttpHooks
 import com.dylenpoki.dyltun.HttpResponse
 import com.dylenpoki.dyltun.MqttInspector
+import com.dylenpoki.dyltun.InspectionContext
+import com.dylenpoki.dyltun.InspectionResult
+import com.dylenpoki.dyltun.ProtocolId
+import com.dylenpoki.dyltun.ProtocolInspector
+import com.dylenpoki.dyltun.ProtocolMetadata
 import com.dylenpoki.dyltun.ResponseSource
 import com.dylenpoki.dyltun.RoutingContext
 import com.dylenpoki.dyltun.RoutingDecision
@@ -19,11 +24,12 @@ import com.dylenpoki.dyltun.TlsClientHelloInspector
 import com.dylenpoki.dyltun.internal.android.DatagramConnector
 import com.dylenpoki.dyltun.internal.android.PacketDevice
 import com.dylenpoki.dyltun.internal.android.StreamConnector
+import com.dylenpoki.dyltun.internal.inspection.ProtocolDetection
 import com.dylenpoki.dyltun.internal.packet.Ipv4Packet
 import com.dylenpoki.dyltun.internal.packet.PacketWriter
 import com.dylenpoki.dyltun.internal.packet.TcpPacket
 import com.dylenpoki.dyltun.internal.protocol.http1.BodyReader
-import com.dylenpoki.dyltun.internal.protocol.http1.ByteSource
+import com.dylenpoki.dyltun.internal.stream.ByteSource
 import com.dylenpoki.dyltun.internal.protocol.http1.HttpFraming
 import com.dylenpoki.dyltun.internal.protocol.http1.HttpInput
 import com.dylenpoki.dyltun.internal.stack.TcpEndpoint.Companion.ACK
@@ -32,6 +38,8 @@ import com.dylenpoki.dyltun.internal.stack.TcpEndpoint.Companion.RST
 import com.dylenpoki.dyltun.internal.stack.TcpEndpoint.Companion.SYN
 import com.dylenpoki.dyltun.internal.stack.unwrapSequence
 import com.dylenpoki.dyltun.internal.stack.wireSequence
+import com.dylenpoki.dyltun.internal.stream.StreamContext
+import com.dylenpoki.dyltun.internal.stream.StreamHandler
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.DataInputStream
@@ -40,6 +48,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.nio.channels.SocketChannel
+import java.nio.ByteBuffer
 import java.util.TreeMap
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
@@ -307,6 +316,11 @@ class TcpRuntimeTest {
     }
 
     @Test fun httpBodyRejectionReachesClientAs413AndFinInsteadOfReset() {
+        // Completion can remove the last stream session while runtime shutdown takes its snapshot.
+        repeat(100) { checkHttpBodyRejection() }
+    }
+
+    private fun checkHttpBodyRejection() {
         val attempts = AtomicInteger()
         val requests = AtomicInteger()
         val config = DyltunConfig.Builder().apply {
@@ -322,6 +336,65 @@ class TcpRuntimeTest {
             assertEquals(0, attempts.get()); assertEquals(0, requests.get())
             assertEquals(DyltunState.Running, harness.session.state.value)
             assertTrue(harness.session.events.replayCache.any { it is DyltunEvent.ConnectionError })
+        }
+    }
+
+    @Test fun nonHttpHandlerReplaysInspectedPrefixAndUsesRoutedUpstream() {
+        ServerSocket(0, 50, loopback).use { server ->
+            server.soTimeout = 5000
+            val id = ProtocolId("test-prefix")
+            val metadata = object : ProtocolMetadata { override val protocolId = id }
+            val prefix = "PING\r\n".toByteArray()
+            val partial = java.util.concurrent.CountDownLatch(1)
+            val opened = AtomicInteger()
+            val config = DyltunConfig.Builder().apply {
+                protocols { install(object : ProtocolInspector {
+                    override val protocolId = id
+                    override fun inspect(context: InspectionContext, prefix: ByteBuffer): InspectionResult {
+                        if (prefix.remaining() < 6) {
+                            if (prefix.remaining() == 2) partial.countDown()
+                            return InspectionResult.NeedMore
+                        }
+                        return InspectionResult.Matched(metadata)
+                    }
+                }) }
+                routing { rule { RoutingDecision.Redirect(Endpoint("127.0.0.1", server.localPort)) } }
+            }.build()
+            val handler = object : StreamHandler {
+                override fun matches(detection: ProtocolDetection): Boolean = detection.metadata.any { it.protocolId == id }
+                override suspend fun handle(context: StreamContext) {
+                    assertEquals(server.localPort, context.destination.port)
+                    assertEquals(80, context.connection.destinationPort)
+                    val message = ByteArrayOutputStream()
+                    while (true) message.write(context.source.read() ?: break)
+                    assertTrue(message.toByteArray().take(prefix.size).toByteArray().contentEquals(prefix))
+                    context.upstream.open(context.destination).use { peer ->
+                        peer.sink.write(("rewritten:" + message.toString("UTF-8")).toByteArray())
+                        peer.finish()
+                        while (true) context.sink.write(peer.source.read() ?: break)
+                    }
+                }
+            }
+            Harness(config, StreamConnector { endpoint -> opened.incrementAndGet(); channel(endpoint) }, { listOf(handler) }).use { harness ->
+                val client = harness.connect()
+                client.sendAt(0, prefix.copyOfRange(0, 2))
+                assertTrue(partial.await(3, TimeUnit.SECONDS))
+                assertEquals(0, opened.get())
+                val message = prefix + "custom-message".toByteArray()
+                client.sendAt(2, message.copyOfRange(2, message.size))
+                client.position += message.size
+                client.finish()
+                server.accept().use { upstream ->
+                    upstream.soTimeout = 5000
+                    val request = upstream.getInputStream().readBytes().toString(Charsets.UTF_8)
+                    assertEquals("rewritten:PING\r\ncustom-message", request)
+                    upstream.getOutputStream().write("handler-response".toByteArray())
+                    upstream.shutdownOutput()
+                    client.readUntilFinished()
+                    assertEquals("handler-response", client.body.toString("UTF-8"))
+                    assertEquals(1, opened.get())
+                }
+            }
         }
     }
 
@@ -349,11 +422,15 @@ class TcpRuntimeTest {
         override fun close() { wakeup() }
     }
 
-    private class Harness(config: DyltunConfig, connector: StreamConnector) : Closeable {
+    private class Harness(
+        config: DyltunConfig, connector: StreamConnector, createHandlers: (() -> List<StreamHandler>)? = null
+    ) : Closeable {
         val device = Device()
         private val clients = mutableMapOf<Int, Client>()
         val session = ManagedSession(Closeable {}) { emit ->
-            IpPacketRuntime(device, config, DatagramConnector { error("Unexpected UDP") }, emit, connector)
+            val datagrams = DatagramConnector { error("Unexpected UDP") }
+            if (createHandlers == null) IpPacketRuntime(device, config, datagrams, emit, connector)
+            else IpPacketRuntime(device, config, datagrams, emit, connector, createHandlers)
         }.also { it.start() }
 
         fun connect(destination: Int = 0xc6336409.toInt()): Client {
@@ -374,7 +451,8 @@ class TcpRuntimeTest {
             }
         }
         override fun close() {
-            session.close(); runBlocking { withTimeout(3000) { session.awaitClosed() } }
+            session.close()
+            runBlocking { withTimeout(3000) { session.awaitClosed() } }
             assertEquals(DyltunState.Stopped, session.state.value)
         }
     }

@@ -1,12 +1,9 @@
 package com.dylenpoki.dyltun.internal.protocol.http1
 
+import com.dylenpoki.dyltun.internal.stream.ByteSource
+import com.dylenpoki.dyltun.internal.stream.CHUNK_BYTES
 import java.io.EOFException
 import java.io.IOException
-
-/** Sources transfer ownership of chunks; a chunk never exceeds [CHUNK_BYTES]. */
-internal fun interface ByteSource { suspend fun read(): ByteArray? }
-internal fun interface ByteSink { suspend fun write(bytes: ByteArray) }
-internal const val CHUNK_BYTES = 16384
 
 internal class HttpProtocolException(message: String) : IOException(message)
 

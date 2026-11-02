@@ -1,5 +1,6 @@
 package com.dylenpoki.dyltun.internal.protocol.http1
 
+import com.dylenpoki.dyltun.internal.stream.CHUNK_BYTES
 import com.dylenpoki.dyltun.HttpHeaders
 import com.dylenpoki.dyltun.isHttpToken
 import java.net.URI

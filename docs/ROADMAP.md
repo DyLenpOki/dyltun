@@ -28,7 +28,9 @@ P0 必须完整表达 hooks/bodyLimits/protocols/routing；P5 才交付具体 TL
 - [x] 定义 Session 状态、FD 接管、close/awaitClosed 和单连接错误观察契约。
 - [x] 定义 HTTP Flow/Headers/make/BodyLimits，明确空内容与不可用内容。
 - [x] 定义内部后端、时钟、传输、预算、缓冲所有权接口。
-- [ ] 在实现扩展前细化 ProtocolInspector/ConnectionRule 上下文、结果及通用流/数据报 SPI。
+- [x] 细化并验证 ProtocolInspector / ConnectionRule 上下文与结果。
+- [x] 落地内部 TCP 处理器选择、有序流、背压、取消与上游资源归属，HTTP 通过该边界接入。
+- [ ] 用实际内容协议验证后稳定公共处理器 SPI；UDP 另设计数据报处理接口，不复用 TCP 流接口。
 
 验收：无 Hooks、显式 null、内联/独立 Hooks、两参数简写及四块组合的调用可编译，无重载歧义。配置失败不接管 FD；Builder 逃逸修改不影响 Session。注册阶段可用有行为的测试扩展验证容器，不以占位模块冒充协议功能。
 
@@ -100,6 +102,7 @@ P3/P4 均验收后才声明支持 HTTP Body 修改及本地响应。
 - [x] 实现 MQTT inspector、到本地 Broker 的重定向和双向转发。
 - [x] 实现 install/tlsSni/mqtt/rule 与 TCP 动作；验证 UDP 使用 Drop 而非 RST。
 - [x] 验证缺失识别器、重复 ID、无效动作在 FD 接管前失败。
+- [x] 用内部测试协议验证首个处理器选择、探测前缀重放、路由目标、真实上游转发与失败/停止清理；不增加 MQTT 修改功能。
 
 验收：两个扩展不修改 TCP/IP 或 HTTP 核心；向原目标发送应用数据前完成阻断/改目标。未知和服务端先发协议继续工作；不宣称 ECH、无 SNI、QUIC、MQTTS 透明可识别。
 

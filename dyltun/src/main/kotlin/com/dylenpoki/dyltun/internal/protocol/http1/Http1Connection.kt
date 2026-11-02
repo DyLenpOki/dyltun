@@ -1,5 +1,8 @@
 package com.dylenpoki.dyltun.internal.protocol.http1
 
+import com.dylenpoki.dyltun.internal.stream.ByteSink
+import com.dylenpoki.dyltun.internal.stream.ByteSource
+import com.dylenpoki.dyltun.internal.stream.StreamConnector
 import com.dylenpoki.dyltun.ConnectionInfo
 import com.dylenpoki.dyltun.DyltunConfig
 import com.dylenpoki.dyltun.ProtocolMetadata
@@ -23,7 +26,7 @@ internal class Http1Connection(
     private val metadata: List<ProtocolMetadata>,
     private val budget: MemoryBudget,
     private val executor: HookExecutor,
-    private val connector: HttpConnector,
+    private val connector: StreamConnector,
     clientSource: ByteSource,
     clientSink: ByteSink,
     finishOutput: () -> Unit = {},

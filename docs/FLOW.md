@@ -43,9 +43,9 @@ flowchart TD
     PROBE --> TR["携带协议元信息评估 rule"]
     TR --> DECIDE{"是否 Reset？"}
     DECIDE -->|"是"| RST
-    DECIDE -->|"否"| HTTP{"hooks 非空且识别为明文 HTTP/1.1？"}
-    HTTP -->|"是"| HP["HTTP 事务处理：见下图"]
-    HTTP -->|"否"| RAW["原始 TCP 流转发"]
+    DECIDE -->|"否"| SELECT["StreamRuntime：按注册顺序选择匹配的处理器"]
+    SELECT -->|"HttpStreamHandler 匹配"| HP["HTTP 事务处理：见下图"]
+    SELECT -->|"无匹配"| RAW["RawStreamSession：原始 TCP 流转发"]
     RAW --> TS["受保护的 TCP Socket：连接并发送字节流"]
     TS --> TN["原目标或重定向目标"]
     TN --> BYTES["上游响应字节流"]
@@ -63,7 +63,35 @@ flowchart TD
 - 初检没有协议元信息，只能执行依赖已满足的规则；协议探测完成后再次评估。
 - 拒绝优先；没有拒绝时选择第一条 Forward/Redirect；没有决定则默认 Forward。
 - TLS SNI 与 MQTT 识别提供路由元信息。TLS 不进行内容解密；MQTT 仍按原始 TCP 流转发。
+- 当前只安装 HTTP 内容处理器，且仅在 hooks 非空时安装。处理器注册边界为 internal，尚未开放公共注册 API。
 - 图中 Socket 节点合并了 protect、物理网络选择、连接和实际 I/O；protect 失败即终止该连接。
+
+## TCP 处理器选择与生命周期
+
+```mermaid
+flowchart TD
+    TCP["TcpRelay：仅包循环操作 TCP 状态"] --> DETECT["ProtocolProbe：有界前缀 → ProtocolDetection"]
+    DETECT --> ROUTE["路由拒绝 / 原目标 / 重定向目标"]
+    ROUTE -->|"允许"| SELECT["StreamRuntime.open：首个匹配 StreamHandler"]
+    SELECT -->|"匹配"| BRIDGE["ProcessedSession：有界输入与输出"]
+    SELECT -->|"无匹配"| RAW["RawStreamSession：直接连接 TcpForwarder"]
+    BRIDGE --> HTTP["HttpStreamHandler：当前唯一内容处理器"]
+    HTTP --> OWNED["StreamContext.upstream：按需打开并归属当前连接"]
+    OWNED --> SOCKET["TcpForwarder：受保护上游 Socket"]
+    RAW --> SOCKET
+    BRIDGE --> OUT["统一 StreamSession 输出 / EOF / 错误"]
+    RAW --> OUT
+    OUT --> TCP
+    STOP["Session.close / 连接取消"] --> CANCEL["禁止新工作、取消任务、关闭上游"]
+    CANCEL --> WAIT["等待处理器及其子协程退出"]
+    WAIT --> CLEAN["关闭处理器共享资源，完成 awaitClosed"]
+```
+
+处理器通过 StreamContext 获得有序字节流、原连接信息、路由目标、探测结果与上游连接能力。探测不消费前缀；选择处理器后从完整客户端流开始读取。处理器输出仍须经 TCP endpoint 分段回写，不能直接写 TUN。
+
+处理器路径入/出各 4 块、每块至多 16 KiB；慢消费者通过挂起读写施加背压。原始路径保留直接转发：上传按实际上游写入释放信用，下行按应用 ACK 补充上游读取额度。停止后仍未返回的同步 Hook 继续占用处理器连接名额，直到任务真正退出。
+
+新增 TCP 内容协议时在组装处安装内部 StreamHandler，TcpRelay 无需增加协议分支。UDP 继续使用有边界的数据报路径；本次没有增加 MQTT 修改或公共处理器 SPI。内部契约与扩展步骤见 [STREAM_PROCESSORS.md](STREAM_PROCESSORS.md)。
 
 ## 普通 HTTP/1.1 事务
 
@@ -123,12 +151,14 @@ flowchart TD
 | IpPacketRuntime / TcpRelay | 包循环、连接表、TCP 状态及唯一 TUN 写入 |
 | TcpForwarder / UdpForwarder | TCP/UDP 各自的 Selector worker 与有界 I/O 队列 |
 | ProtocolProbe / RoutingEvaluator | 有界前缀识别与连接动作评估 |
-| HttpRuntime | HTTP 协程、Session Body 预算及有界字节流桥接 |
+| StreamRuntime / StreamSession | 处理器选择、有界流桥接、任务取消、连接与上游资源归属 |
+| RawStreamSession | 保留直接转发及按应用 ACK 释放下行信用 |
+| HttpStreamHandler | HTTP 适配、Session Body 预算、HookExecutor 生命周期 |
 | Http1Connection | 顺序事务循环、事务作用域与资源清理 |
 | HttpExchange | 单次请求、本地/上游分支、错误恢复阶段与升级 |
 | HttpResponseWriter | 响应 Hook、Body 准备、编码与输出 |
 | HookExecutor | 受限工作执行器，运行宿主的同步 HTTP Hooks |
 
-HTTP 处理器不直接操作 TUN 或 TCP 序列号。当前没有面向任意协议的通用内容修改处理器注册接口；新协议可扩展前缀识别和连接路由。
+协议处理器不直接操作 TUN 或 TCP 序列号。内部已有通用 TCP 处理边界；公共扩展仍为 ProtocolInspector / ConnectionRule，尚无公共内容处理器注册接口。
 
 公开配置和使用方式见 [API.md](API.md)，行为约束见 [DESIGN.md](DESIGN.md)。

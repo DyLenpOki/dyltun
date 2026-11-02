@@ -8,7 +8,7 @@
 
 **当前状态：实验性版本 `0.1.0-SNAPSHOT`，API 可能调整。** IPv4 TCP/UDP、明文 HTTP/1.1 修改与本地响应已接通，TLS SNI 阻断和 MQTT 重定向已参与实际运行。尚未完成多版本真机、长期负载与稳定版本验收。
 
-支持 request/response Hooks、HttpResponse.make、上游失败时的 error Hook 回退、identity/gzip、Body 方向/总预算及超限流式回退。本轮 124 项 JVM 测试和 8 项 API 34 Android 测试通过；此前真实 VPN 验证 TCP/UDP DNS 和 HTTP 本地响应。实现范围、资源上限和验证见 [IMPLEMENTATION.md](docs/IMPLEMENTATION.md)。
+支持 request/response Hooks、HttpResponse.make、上游失败时的 error Hook 回退、identity/gzip、Body 方向/总预算及超限流式回退。本轮 136 项 JVM 测试和 8 项 API 34 Android 测试通过；此前真实 VPN 验证 TCP/UDP DNS 和 HTTP 本地响应。实现范围、资源上限和验证见 [IMPLEMENTATION.md](docs/IMPLEMENTATION.md)。
 
 接入自己的 Android 应用，请从 [API 使用文档](docs/API.md) 开始，包含依赖配置、VpnService 初始化和可复制的调用示例。
 
@@ -34,6 +34,7 @@ Linux/macOS 将 `.\gradlew.bat` 换成 `bash ./gradlew`。先配置 Android SDK�
 | [API.md](docs/API.md) | 接入指南、HTTP 修改与本地响应、Body 限额、路由、Session 和扩展接口 | 将模块接入自己的 Android 应用 |
 | [DESIGN.md](docs/DESIGN.md) | 模块职责、数据路径、生命周期、HTTP 与路由行为 | 理解和实现内部逻辑 |
 | [FLOW.md](docs/FLOW.md) | 初始化、TCP/UDP 数据流、HTTP Hooks 和资源归属流程图 | 对照代码理解运行过程 |
+| [STREAM_PROCESSORS.md](docs/STREAM_PROCESSORS.md) | 内部 TCP 处理器选择、有序流、背压和资源生命周期 | 接入后续内容协议 |
 | [ROADMAP.md](docs/ROADMAP.md) | 实施顺序、依赖关系、阶段验收清单 | 按阶段执行和核对进度 |
 | [CHANGELOG.md](CHANGELOG.md) | 软件变更与尚未发布的内容 | 查看功能和修复记录 |
 | [DESIGN_HISTORY.md](docs/DESIGN_HISTORY.md) | 设计版本和决策变化 | 对照历史决定 |

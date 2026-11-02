@@ -17,6 +17,7 @@ This file records software changes. There are no published releases yet; the cur
 
 ### Changed
 
+- Decoupled TCP relay orchestration from HTTP through internal stream handlers and a shared runtime for selection, bounded I/O, cancellation and upstream ownership. Raw TCP retains its direct forwarding and ACK-based read credit; UDP keeps its datagram path. Public APIs are unchanged; MQTT message editing is not included.
 - Split HTTP connection orchestration, single-exchange handling and shared response output into separate internal classes, with explicit exchange results and upstream-recovery phases. Packet/TCP algorithms and thread ownership remain unchanged.
 
 ### Fixed

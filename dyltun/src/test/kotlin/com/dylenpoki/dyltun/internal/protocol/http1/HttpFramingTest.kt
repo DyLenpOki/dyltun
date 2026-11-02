@@ -1,5 +1,7 @@
 package com.dylenpoki.dyltun.internal.protocol.http1
 
+import com.dylenpoki.dyltun.internal.stream.ByteSource
+import com.dylenpoki.dyltun.internal.stream.CHUNK_BYTES
 import com.dylenpoki.dyltun.HttpHeaders
 import java.io.ByteArrayOutputStream
 import java.io.EOFException

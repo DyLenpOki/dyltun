@@ -1,5 +1,10 @@
 package com.dylenpoki.dyltun.internal.protocol.http1
 
+import com.dylenpoki.dyltun.internal.stream.ByteSink
+import com.dylenpoki.dyltun.internal.stream.ByteSource
+import com.dylenpoki.dyltun.internal.stream.CHUNK_BYTES
+import com.dylenpoki.dyltun.internal.stream.StreamConnector
+import com.dylenpoki.dyltun.internal.stream.StreamPeer
 import com.dylenpoki.dyltun.BodyLimit
 import com.dylenpoki.dyltun.BodyLimits
 import com.dylenpoki.dyltun.BodyOverflow
@@ -86,9 +91,9 @@ class BodyRejectionTest {
             }
         }.build()
         HookExecutor().use { executor ->
-            val connector = HttpConnector {
+            val connector = StreamConnector {
                 opens++
-                object : HttpPeer {
+                object : StreamPeer {
                     override val source = source(response, blockResponse)
                     override val sink = ByteSink {}
                     override fun finish() {}

@@ -26,6 +26,7 @@ internal class ProtocolProbe(
     var httpMatched = false
         private set
     val metadata: List<ProtocolMetadata> get() = Collections.unmodifiableList(ArrayList(found))
+    val result: ProtocolDetection get() = ProtocolDetection(metadata, httpMatched)
 
     fun advance(prefix: ByteArray, endOfInput: Boolean): Boolean {
         require(prefix.size <= MAX_PREFIX)
@@ -62,3 +63,6 @@ internal class ProtocolProbe(
 
     companion object { const val MAX_PREFIX = 65535 }
 }
+
+/** Built-in HTTP detection remains separate from public inspector IDs to avoid ID collisions. */
+internal data class ProtocolDetection(val metadata: List<ProtocolMetadata>, val http1: Boolean = false)

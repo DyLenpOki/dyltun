@@ -1,5 +1,6 @@
 package com.dylenpoki.dyltun.internal.protocol.http1
 
+import com.dylenpoki.dyltun.internal.stream.ByteSink
 import com.dylenpoki.dyltun.BodyLimit
 import com.dylenpoki.dyltun.BodyState
 import com.dylenpoki.dyltun.HttpFlow

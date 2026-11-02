@@ -32,13 +32,18 @@
 | internal.stack | Kotlin TCP endpoint、UDP 会话、回包生成 |
 | internal.engine | 启停、调度、连接表、预算和任务归属 |
 | internal.inspection | 有界协议探测、元信息和前缀重放 |
+| internal.stream | TCP 处理器选择、有序流接口、有界桥接、任务与上游资源生命周期 |
 | internal.routing | 放行、重定向、RST/Drop 决策 |
 | internal.protocol.http1 | HTTP/1.1 编解码、Hooks、本地响应 |
 | internal.transport | 上游 TCP/UDP I/O、连接与物理网络解析 |
 
 实现依赖公共模型和小接口，由引擎组装。HTTP 不直接操作 TUN 或 TCP 序列号，协议插件不依赖连接表内部结构。
 
-当前公共 API/SPI 位于根包；实现已有 internal.android / packet / stack / engine / inspection / protocol.http1 / transport。路由契约及评估器在根包 RoutingConfig.kt 中。IpPacketRuntime 组装包循环、TCP/UDP 与 HTTP；不使用 native 后端。
+当前公共 API/SPI 位于根包；实现已有 internal.android / packet / stack / engine / inspection / stream / protocol.http1 / transport。路由契约及评估器在根包 RoutingConfig.kt 中。IpPacketRuntime 组装包循环、TCP/UDP 与处理器运行时；不使用 native 后端。
+
+TcpRelay 在探测和路由后向 StreamRuntime 请求统一 StreamSession，不再判断具体内容协议。StreamRuntime 按注册顺序选择首个匹配的内部 StreamHandler；未匹配时使用 RawStreamSession 保留直接转发。当前内容处理器仅有 HttpStreamHandler，hooks 非空时安装；TLS 与 MQTT 仍只参与识别和路由。
+
+StreamContext 提供原始连接、路由目标、识别结果、可取消的有序输入/输出、输出半关闭、受保护的上游连接能力和错误报告。通过上下文打开的上游属于当前连接，正常结束、异常和停止均回收。处理器任务及其结构化子协程由 StreamRuntime 管理；单连接失败不取消兄弟连接。TCP 状态与 TUN 写入始终归包循环。UDP 不复用流接口，保留数据报边界。详细契约见 [STREAM_PROCESSORS.md](STREAM_PROCESSORS.md)。
 
 HTTP 内部分为三个职责：Http1Connection 管理按序事务循环与事务资源作用域；HttpExchange 编排单次请求、本地/上游分支、错误回退及升级；HttpResponseWriter 统一响应 Hook、Body 准备和输出。ExchangeResult 明确表达继续复用、关闭或已升级。ResponseInput 区分本地响应与携带完整头/Body 上下文的上游响应，避免多组可空参数。具体兼容性约束见 [REFACTORING.md](REFACTORING.md)。
 
@@ -106,7 +111,7 @@ TUN 使用平台 Os.poll 和非阻塞 Unix datagram socketpair 唤醒，不忙�
 | TLS SNI 阻断 | 跨 TCP 分段/TLS record 的 ClientHello 中可见 SNI | 域名集合中任意完整域名/子域匹配后有效 RST；不解密 TLS |
 | MQTT 重定向 | CONNECT 等协议特征 | 改连本地 Broker，重放前缀并双向转发；不只按端口猜测 |
 
-ECH、无 SNI、QUIC 和 MQTTS 密文不能承诺提取真实目标域名/MQTT 内容；需要明确未知策略，默认仍遵守未知协议转发规则。通用双向协议处理 SPI 保留，具体签名在扩展实现前细化。
+ECH、无 SNI、QUIC 和 MQTTS 密文不能承诺提取真实目标域名/MQTT 内容；需要明确未知策略，默认仍遵守未知协议转发规则。通用 TCP 处理契约已在 internal.stream 落地，尚未开放公共处理器 SPI；未来应通过实际协议功能验证后再稳定对外签名。本轮不提供 MQTT 消息修改。
 
 ## 5. HTTP Hooks 与本地响应
 
@@ -196,6 +201,8 @@ TCP/IP 后端位于 internal.stack / packet，由 IpPacketRuntime 和 TcpRelay �
 | 输出 | 正确 IP/传输头和校验和；不截断产生坏包 |
 
 状态由单一执行上下文拥有，时钟可注入。网络 I/O、状态机和 Hooks 用有界队列连接；慢上游必须反馈到 TCP 接收窗口。每 Session 独立持有连接表、任务、预算和注册表，不使用 GlobalScope/全局连接表。
+
+处理器注册表按 Session 复制，连接登记、移除和停止快照共享同一锁。处理器入/出队列各 4 块，每块最多 16 KiB；取消但尚未真正退出的任务继续占用 64 个名额之一，避免晚到回调累积。关闭上游先于等待任务；等待结束后才关闭处理器共享资源。原始 TCP 不经过协程桥接，仍按实际写入/应用 ACK 释放对应方向的信用。
 
 头部、探测前缀、分片、TCP/UDP 缓冲和连接数量有独立的内部有限预算，当前数值记录在 IMPLEMENTATION.md，不增加公开根 DSL 字段。错误通过 DyltunSession.events 观察，终止原因保留在 state。
 

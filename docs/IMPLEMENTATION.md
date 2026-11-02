@@ -12,6 +12,7 @@
 | IPv4/UDP | 长度/校验和/选项、有限分片重组、转发/Redirect/Drop、空包/多响应 | 没有完整 ICMP 错误转换、PMTU、网络切换迁移；不转发 IPv6 |
 | TCP | 独立序列空间、握手、窗口、乱序/重复、RTT/RTO/快速重传、基本拥塞控制、半关闭/RST/TIME_WAIT | 不协商窗口缩放、SACK、时间戳；尚无长期真机/性能结论 |
 | 协议路由 | 开放 inspector/rule SPI、lambda rule、TLS 域名集合/MQTT 值动作自动默认识别器、完整前缀重放 | 显式识别器优先；旧动作块/自定义规则保留依赖校验；探测最多 65,535 字节/1 秒 |
+| 内部 TCP 处理器 | 按识别结果选择、统一有序流、背压、结构化取消、每连接上游资源归属；HTTP 已接入 | internal 接口；未匹配时原始转发，尚无公共内容处理 SPI 或 MQTT 修改 |
 | HTTP/1.1 | 增量头部/Body 编解码、chunked/trailers、Content-Length、关闭分隔、持久客户端连接与顺序流水请求 | 当前每笔事务使用独立上游 Socket，尚不做上游连接池 |
 | HTTP Hooks | 请求/响应 URL、Header、Body 修改、独立有界执行器、连接内顺序、上游失败时的 error Hook 本地回退 | 仅明文 HTTP/1.1；error 不恢复 Hook/协议/Body 拒绝或已提交响应；同步 Hook 无法被安全强杀，可能延迟 awaitClosed |
 | 本地响应 | request 中设置 flow.response、HttpResponse.make、LOCAL 来源、零上游连接、一次 response Hook | 未读完上传时发送响应后关闭；旧上游响应被替换时关闭其 Socket |
@@ -30,11 +31,12 @@
 - internal.transport：TCP 与 UDP 各一个 Selector worker，有界发送/接收邮箱。
 - internal.inspection：保留原始前缀的有界探测与多协议元信息。
 - internal.engine：会话、五元组表、预算、唯一 TUN 写入线程与处理器组装。
-- internal.protocol.http1：增量编解码、Body 策略、Hooks、本地响应和协程桥接。
+- internal.stream：处理器选择、统一 TCP 流端口、有界协程桥接、取消与上游资源归属。
+- internal.protocol.http1：HTTP 处理器适配、增量编解码、Body 策略、Hooks 与本地响应。
 
 HTTP 编排已拆分：Http1Connection 负责连接循环和事务清理，HttpExchange 负责单次事务及恢复阶段，HttpResponseWriter 统一上游/本地/错误回退的响应处理。事务结果使用明确枚举，上游响应上下文使用类型封装。TCP/UDP 算法、唯一包循环和 TUN 写线程归属不变；完整兼容性检查见 [REFACTORING.md](REFACTORING.md)。
 
-Session 拥有原始 PFD；TunDevice 仅关闭自己的唤醒 socketpair。包循环唯一操作 TCP 状态和写入 TUN。HTTP 处理器只接触有序字节流，通过有界 Channel 与包循环交换数据。应用侧 TCP 与系统上游 Socket 使用独立序列空间，修改长度无需在原 TCP 序列号上做差量映射。
+Session 拥有原始 PFD；TunDevice 仅关闭自己的唤醒 socketpair。包循环唯一操作 TCP 状态和写入 TUN。TcpRelay 通过统一 StreamSession 交换数据，StreamRuntime 选择内部处理器并管理任务与上游资源；HTTP 处理器只接触有序字节流，通过有界 Channel 与包循环交换数据。原始转发保持直接路径。应用侧 TCP 与系统上游 Socket 使用独立序列空间，修改长度无需在原 TCP 序列号上做差量映射。详见 [STREAM_PROCESSORS.md](STREAM_PROCESSORS.md)。
 
 所有上游 Socket 在 connect 前 protect 并检查结果，再绑定物理 Network（API 22+）并连接。DNS 仍在各自 Selector worker 中同步解析；解析延迟会影响该 worker 的其他连接，独立可取消 DNS 是后续缺口。
 
@@ -47,7 +49,7 @@ Session 拥有原始 PFD；TunDevice 仅关闭自己的唤醒 socketpair。包�
 | TCP 上游邮箱 | 8 个发送块、4 个接收块，每块最多 16 KiB；另有一个当前写入块 |
 | TCP 超时 | connect 10 秒；空闲 300 秒；FIN_WAIT_2/TIME_WAIT/关闭排空 60 秒 |
 | 协议探测 | 客户端前缀 65,535 字节、握手后 1 秒、EOF 回退 |
-| HTTP 桥接 | 每连接入/出各 4 块，块最大 16 KiB，另有当前游标/待发送块 |
+| TCP 处理器桥接 | 每连接入/出各 4 块，块最大 16 KiB，另有当前游标/待发送块；取消未退出任务仍计入 64 个连接名额 |
 | HTTP 头部 | 单行 8 KiB、头字段区 32 KiB、128 字段；编码输出也检查上限 |
 | HTTP Hooks | 最多 4 个执行线程、64 个待执行任务；过载只终止所属连接 |
 | HTTP Body | BodyLimits 配置；每笔事务最多 16,384 个受管分配记录 |
@@ -55,7 +57,7 @@ Session 拥有原始 PFD；TunDevice 仅关闭自己的唤醒 socketpair。包�
 | IPv4 分片 | 64 组、每组 256 片、4 MiB 内容预算、15 秒绝对超时；重叠整组拒绝 |
 | Session 事件 | 回放 16 项 + 额外 48 项，慢消费者丢最旧项 |
 
-TCP 只在实际上游写入或 HTTP 消费后释放应用上传信用。原始 TCP 下行只在应用 ACK 后补充上游读取信用；HTTP 改写下行经独立有界队列与 TCP 发送窗口背压。
+TCP 只在实际上游写入或处理器消费后释放应用上传信用。原始 TCP 下行只在应用 ACK 后补充上游读取信用；处理器下行经独立有界队列与 TCP 发送窗口背压。
 
 Body 预算在聚合、连续数组、解压/重编码和模型副本分配前申请。请求内容保留到响应 Hook 结束；本地响应挂载时计费，修改结果不能用 STREAM 绕过限额。content getter 副本、text 解码暂存按保守容量计费，直到事务结束释放。调用者离线 make、自己创建的临时字符串或故意保留的外部对象不属于可控制的总堆内存。
 
@@ -65,7 +67,11 @@ REJECT 在聚合阶段、最终响应头尚未发出时返回空 Body 的 413（
 
 ## 验证证据
 
-本轮兼容性简化后，124 项 JVM 测试、8 项 API 34 Android 测试均通过，无失败或跳过。与 CI 相同的 145 个 Gradle 任务完成，库/示例 Lint 无错误（仍有 1 / 4 条既有提醒）；release AAR、源码包、本地 Maven publication、测试 APK 和示例 APK 构建通过。新增配置工厂/启动重载、默认识别器优先级、lambda 规则、103 后 EOF 回退与 101 后禁止回退均有验证。独立宿主编译了新旧 API 和文档完整示例；既有 Kotlin 2.2.10 / AGP 8.13.2 宿主的 10 项单元测试和 debug APK 构建通过。本轮未重跑真实 VPN 网络或业务请求。拆分、兼容性约束及结果见 [REFACTORING.md](REFACTORING.md)。
+本轮 TCP 处理器边界整理后，136 项 JVM 测试、8 项 API 34 Android 测试均通过，无失败或跳过。保留原有 124 项测试，新增 12 项处理器/资源归属回归，并在完整 HTTP 413/FIN 测试中连续执行 100 次启停。覆盖选择顺序、注册表快照、背压、半关闭、失败隔离、子协程取消、上游关闭竞态、未退出任务容量，以及非 HTTP 测试协议的完整前缀、路由目标和真实 Socket 收发。修复验证中发现的连接完成与停止快照竞态。
+
+与 CI 相同的 145 个 Gradle 任务完成；库/示例 Lint 无错误（仍有 1 / 4 条既有提醒），release AAR、源码包、本地 Maven publication、测试 APK 与示例 APK 构建通过。独立 Android 宿主编译通过；既有 Kotlin 2.2.10 / AGP 8.13.2 宿主的 10 项单元测试和 debug APK 构建通过。公共 API 未变，未增加 MQTT 修改或公共处理器 SPI。本轮未重跑真实 VPN 网络或业务请求，内部契约见 [STREAM_PROCESSORS.md](STREAM_PROCESSORS.md)。
+
+此前兼容性简化完成时，124 项 JVM / 8 项 Android 测试及独立/既有宿主编译通过；新增配置工厂/启动重载、默认识别器优先级、lambda 规则、103 后 EOF 回退与 101 后禁止回退均有验证。拆分、兼容性约束及当时结果见 [REFACTORING.md](REFACTORING.md)。
 
 以下保留此前的验证过程和覆盖范围：
 
