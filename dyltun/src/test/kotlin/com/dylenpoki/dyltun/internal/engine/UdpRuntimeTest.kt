@@ -1,6 +1,7 @@
 package com.dylenpoki.dyltun.internal.engine
 
 import com.dylenpoki.dyltun.ConnectionRule
+import com.dylenpoki.dyltun.ConnectionStage
 import com.dylenpoki.dyltun.DyltunConfig
 import com.dylenpoki.dyltun.DyltunEvent
 import com.dylenpoki.dyltun.DyltunState
@@ -13,6 +14,7 @@ import com.dylenpoki.dyltun.internal.android.StreamConnector
 import com.dylenpoki.dyltun.internal.packet.Ipv4Packet
 import com.dylenpoki.dyltun.internal.packet.Ipv4Reassembler
 import com.dylenpoki.dyltun.internal.packet.PacketWriter
+import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -22,6 +24,7 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -116,6 +119,35 @@ class UdpRuntimeTest {
         assertEquals(0, attempts.get())
         assertEquals(DyltunState.Stopped, session.state.value)
         assertTrue(session.events.replayCache.any { it is DyltunEvent.PacketRejected })
+    }
+
+    @Test fun connectorFailureIncludesSelectedTargetStageAndDatagramBytes() {
+        val device = QueueDevice()
+        val selected = Endpoint("127.0.0.1", 5353)
+        val config = DyltunConfig.Builder().apply {
+            routing { rule { RoutingDecision.Redirect(selected) } }
+        }.build()
+        val session = ManagedSession(java.io.Closeable {}) { emit ->
+            IpPacketRuntime(device, config, DatagramConnector { throw IOException("test UDP connect failure") }, emit,
+                StreamConnector { error("Unexpected TCP connection") })
+        }
+        session.start()
+        try {
+            device.incoming.offer(PacketWriter.udp(source, destination, 12345, 53, byteArrayOf(1, 2, 3), 1))
+            val event = runBlocking { withTimeout(3000) {
+                session.events.first { it is DyltunEvent.ConnectionError }
+            } } as DyltunEvent.ConnectionError
+            val details = event.diagnostics
+            assertEquals("test UDP connect failure", event.cause.message)
+            assertEquals("udp", details.protocol)
+            assertEquals(selected, details.upstream)
+            assertEquals(null, details.resolvedUpstream)
+            assertEquals(ConnectionStage.CONNECTING, details.stage)
+            assertEquals(3L, details.bytesFromClient)
+            assertEquals(DyltunState.Running, session.state.value)
+        } finally {
+            session.close(); runBlocking { withTimeout(3000) { session.awaitClosed() } }
+        }
     }
 
     private class QueueDevice : PacketDevice {

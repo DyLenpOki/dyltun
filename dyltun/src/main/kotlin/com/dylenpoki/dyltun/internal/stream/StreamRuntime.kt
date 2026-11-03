@@ -1,8 +1,11 @@
 package com.dylenpoki.dyltun.internal.stream
 
 import com.dylenpoki.dyltun.ConnectionInfo
+import com.dylenpoki.dyltun.ConnectionStage
+import com.dylenpoki.dyltun.DyltunEvent
 import com.dylenpoki.dyltun.Endpoint
 import com.dylenpoki.dyltun.ProtocolConfig
+import com.dylenpoki.dyltun.internal.diagnostics.ConnectionTrace
 import com.dylenpoki.dyltun.internal.inspection.ProtocolDetection
 import com.dylenpoki.dyltun.internal.inspection.ProtocolProbe
 import com.dylenpoki.dyltun.internal.stack.MonotonicClock
@@ -10,6 +13,7 @@ import com.dylenpoki.dyltun.internal.transport.TcpForwarder
 import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -27,11 +31,12 @@ internal class StreamRuntime(
     private val protocols: ProtocolConfig,
     private val forwarder: TcpForwarder,
     private val wakeup: () -> Unit,
-    private val report: (ConnectionInfo, Throwable) -> Unit,
+    private val report: (DyltunEvent.ConnectionError) -> Unit,
     handlers: List<StreamHandler> = emptyList(),
-    private val connector: StreamConnector = ForwarderStreamConnector(forwarder)
+    private val connector: StreamConnector? = null
 ) : Closeable {
     private val handlers = handlers.toList()
+    private val upstreamIds = AtomicLong()
     private val job = SupervisorJob()
     private val scope = CoroutineScope(job + Dispatchers.Default)
     private val lock = Any()
@@ -45,14 +50,20 @@ internal class StreamRuntime(
         ProtocolProbe(protocols, connection, clock, handlers.any { it.probeHttp1 })
 
     /** Registration order determines the first matching processor; unmatched traffic stays raw. */
-    fun open(connection: ConnectionInfo, destination: Endpoint, detection: ProtocolDetection): StreamSession =
+    fun open(
+        connection: ConnectionInfo, destination: Endpoint, detection: ProtocolDetection,
+        trace: ConnectionTrace = ConnectionTrace(connection)
+    ): StreamSession =
         synchronized(lock) {
             check(!stopped) { "Stream runtime is stopped" }
             check(sessions.size < 64) { "Stream connection limit reached" }
             val handler = handlers.firstOrNull { it.matches(detection) }
             val session = if (handler == null) {
-                RawStreamSession(forwarder.open(connection.id, destination), ::release)
-            } else ProcessedSession(connection, destination, detection, handler)
+                RawStreamSession(forwarder.open(connection.id, destination, trace), ::release)
+            } else {
+                trace.stage(ConnectionStage.PROCESSING)
+                ProcessedSession(connection, destination, detection, handler, trace)
+            }
             sessions += session
             if (session is ProcessedSession) session.start()
             session
@@ -61,13 +72,14 @@ internal class StreamRuntime(
     private fun release(session: StreamSession) { synchronized(lock) { sessions.remove(session) } }
 
     private inner class ProcessedSession(
-        connection: ConnectionInfo, destination: Endpoint, detection: ProtocolDetection, handler: StreamHandler
+        connection: ConnectionInfo, destination: Endpoint, detection: ProtocolDetection, handler: StreamHandler,
+        trace: ConnectionTrace
     ) : StreamSession {
         private val input = Channel<ByteArray>(4)
         private val output = Channel<ByteArray>(4)
         private val consumed = AtomicInteger()
         private val error = AtomicReference<Throwable?>()
-        private val upstream = OwnedStreamConnector(connector)
+        private val upstream = OwnedStreamConnector(connector ?: ForwarderStreamConnector(forwarder, upstreamIds, trace))
         private val closing = AtomicBoolean()
         private val entered = AtomicBoolean()
         private var pending: ByteArray? = null // Packet-loop owner only.
@@ -83,7 +95,7 @@ internal class StreamRuntime(
                 output.send(bytes)
                 wakeup()
             },
-            { output.close(); wakeup() }, upstream, { report(connection, it) })
+            { output.close(); wakeup() }, upstream, { report(DyltunEvent.ConnectionError(connection, it, trace.snapshot())) }, trace)
         private val processor = scope.launch(start = CoroutineStart.LAZY) {
             entered.set(true)
             try { coroutineScope { handler.handle(context) } }

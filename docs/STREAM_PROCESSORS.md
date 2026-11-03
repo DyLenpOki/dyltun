@@ -45,6 +45,8 @@
 - 连接登记、移除、容量检查和停止快照共享同一锁；避免最后一个任务完成时与停止快照发生竞态。连接上限为 64，已取消但尚未退出的处理器仍计入。
 - pending 输出与 TCP 状态只由包循环修改；其他线程通过有界队列和原子/可见性状态通信。UDP 的生命周期和队列保持独立。
 
+StreamContext 另提供内部 ConnectionTrace 供协议模块写入观察信息。流运行时与上游连接器沿用同一 trace，错误事件附上快照；HTTP 模块记录原始请求 authority、方法、去除 query 的路径与 Flow ID。trace 不拥有流、Socket、Body 或任务，不能替代资源管理与错误恢复逻辑。DNS 候选独立于已识别 Host/SNI。公开字段见 [API.md](API.md#84-连接错误上下文)。
+
 ## 接入后续协议
 
 新增 TCP 内容协议时，先实现有界 ProtocolInspector 生成元信息，再在对应 internal.protocol 包中实现 StreamHandler。由 IpPacketRuntime 的组装入口创建每 Session 的处理器注册表；无需给 TcpRelay 新增协议分支。协议模块自己管理消息 framing、编解码、内容限额和业务修改；通用层只管理流与任务。

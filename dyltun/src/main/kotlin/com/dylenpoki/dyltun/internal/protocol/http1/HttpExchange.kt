@@ -4,6 +4,7 @@ import com.dylenpoki.dyltun.internal.stream.StreamConnector
 import com.dylenpoki.dyltun.internal.stream.StreamPeer
 import com.dylenpoki.dyltun.BodyState
 import com.dylenpoki.dyltun.ConnectionInfo
+import com.dylenpoki.dyltun.ConnectionStage
 import com.dylenpoki.dyltun.DyltunConfig
 import com.dylenpoki.dyltun.Endpoint
 import com.dylenpoki.dyltun.HttpFlow
@@ -13,6 +14,7 @@ import com.dylenpoki.dyltun.ProtocolMetadata
 import com.dylenpoki.dyltun.RoutingContext
 import com.dylenpoki.dyltun.RoutingDecision
 import com.dylenpoki.dyltun.RoutingEvaluator
+import com.dylenpoki.dyltun.internal.diagnostics.ConnectionTrace
 import java.io.EOFException
 import java.net.URI
 import java.util.concurrent.atomic.AtomicLong
@@ -37,7 +39,8 @@ internal class HttpExchange(
     private val client: HttpClient,
     private val responses: HttpResponseWriter,
     private val flowIds: AtomicLong,
-    private val report: (Throwable) -> Unit
+    private val report: (Throwable) -> Unit,
+    private val trace: ConnectionTrace? = null
 ) {
     private enum class ResponsePhase { AWAITING_UPSTREAM, WRITING_INTERIM, HANDLING_FINAL }
 
@@ -83,6 +86,7 @@ internal class HttpExchange(
         val request = HttpRequest(head.method, head.url, head.headers)
         request.loadBody(body.decoded, body.state, config.bodyLimits.request, account.reserve)
         val flow = HttpFlow(flowIds.incrementAndGet(), connection, request, config.bodyLimits, account.reserve)
+        trace?.httpFlow(flow.id)
         val guard = FramingGuard(request.headers)
         executor.execute { hooks.request(flow) }
         currentCoroutineContext().ensureActive()
@@ -96,6 +100,7 @@ internal class HttpExchange(
     private suspend fun forward(
         request: PreparedRequest, account: BodyAccount, transactionScope: CoroutineScope
     ): ExchangeResult {
+        trace?.stage(ConnectionStage.ROUTING)
         val endpoint = destination(request.flow.request, request.head.url)
         try {
             guardedHttpPeer(connector, endpoint).use { peer ->

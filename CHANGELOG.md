@@ -6,6 +6,7 @@ This file records software changes. There are no published releases yet; the cur
 
 ### Added
 
+- Structured connection-error diagnostics with HTTP authority or TLS SNI provenance, bounded passive DNS candidates, selected/resolved upstream endpoints, last stage/TCP state, HTTP method/path/flow ID, duration and directional byte counts. Query strings, headers and bodies are excluded from diagnostic fields.
 - Reusable `dyltunConfig {}` and `VpnService.dyltun(fd, config)`, retaining all existing startup forms.
 - Value-action TLS domain-collection and MQTT routes with automatic default inspectors and explicit-inspector precedence; lambda custom rules alongside `ConnectionRule`.
 - Kotlin Android library and runnable `VpnService` sample under `com.dylenpoki.dyltun`.
@@ -17,7 +18,7 @@ This file records software changes. There are no published releases yet; the cur
 
 ### Changed
 
-- Decoupled TCP relay orchestration from HTTP through internal stream handlers and a shared runtime for selection, bounded I/O, cancellation and upstream ownership. Raw TCP retains its direct forwarding and ACK-based read credit; UDP keeps its datagram path. Public APIs are unchanged; MQTT message editing is not included.
+- Decoupled TCP relay orchestration from HTTP through internal stream handlers and a shared runtime for selection, bounded I/O, cancellation and upstream ownership. Raw TCP retains its direct forwarding and ACK-based read credit; UDP keeps its datagram path. Startup, hooks and routing APIs are unchanged; MQTT message editing is not included.
 - Split HTTP connection orchestration, single-exchange handling and shared response output into separate internal classes, with explicit exchange results and upstream-recovery phases. Packet/TCP algorithms and thread ownership remain unchanged.
 
 ### Fixed

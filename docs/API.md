@@ -795,7 +795,8 @@ sealed interface DyltunState {
 sealed interface DyltunEvent {
     data class ConnectionError(
         val connection: ConnectionInfo?,
-        val cause: Throwable
+        val cause: Throwable,
+        val diagnostics: ConnectionDiagnostics = ConnectionDiagnostics()
     ) : DyltunEvent
     data class PacketRejected(val reason: String) : DyltunEvent
 }
@@ -839,8 +840,18 @@ fun observeSession(scope: CoroutineScope, session: DyltunSession) {
     scope.launch {
         session.events.collect { event ->
             when (event) {
-                is DyltunEvent.ConnectionError ->
-                    Log.w("MyVpn", "Connection ${event.connection?.id} failed", event.cause)
+                is DyltunEvent.ConnectionError -> {
+                    val details = event.diagnostics
+                    Log.w(
+                        "MyVpn",
+                        "Connection ${event.connection?.id} failed: " +
+                            "host=${details.host} source=${details.hostSource} " +
+                            "dnsCandidates=${details.dnsCandidates} " +
+                            "upstream=${details.upstream} resolved=${details.resolvedUpstream} " +
+                            "stage=${details.stage} tcpState=${details.tcpState}",
+                        event.cause
+                    )
+                }
                 is DyltunEvent.PacketRejected ->
                     Log.w("MyVpn", "Packet rejected: ${event.reason}")
             }
@@ -866,6 +877,54 @@ suspend fun closeSession(session: DyltunSession) {
 不要在主线程使用 `runBlocking` 等待。完成等待后再 `establish()` 新 FD 并创建新 Session；宿主应串行化启停命令，防止旧回调关闭新 Session。
 
 库不管理前台通知，也不调用宿主的 `stopSelf()`。Android 对 VpnService 的绑定可能在 `stopService()` 后继续存在，建议像 sample 一样使用显式停止命令，先关闭 Session，再处理通知和服务退出。
+
+### 8.4 连接错误上下文
+
+`ConnectionError.diagnostics` 是错误发生时的尽力快照，原始异常仍保留在 `cause`。原来的两参数构造调用可继续使用。所有新增类型位于 `com.dylenpoki.dyltun`：
+
+```kotlin
+enum class ConnectionStage {
+    HANDSHAKE, INSPECTION, ROUTING, PROCESSING, CONNECTING, FORWARDING
+}
+
+enum class HostSource { HTTP_AUTHORITY, TLS_SNI }
+
+data class ConnectionDiagnostics(
+    val protocol: String? = null,
+    val host: String? = null,
+    val hostSource: HostSource? = null,
+    val dnsCandidates: List<String> = emptyList(),
+    val upstream: Endpoint? = null,
+    val resolvedUpstream: Endpoint? = null,
+    val stage: ConnectionStage? = null,
+    val tcpState: String? = null,
+    val httpMethod: String? = null,
+    val httpPath: String? = null,
+    val httpFlowId: Long? = null,
+    val durationMillis: Long = 0,
+    val bytesFromClient: Long = 0,
+    val bytesToClient: Long = 0
+)
+```
+
+| 字段 | 含义 |
+|---|---|
+| `protocol` | 已识别协议，如 `http/1.1`、`tls`、`mqtt`；未识别时为 `tcp` / `udp` |
+| `host` / `hostSource` | 已处理 HTTP 请求的原始 authority（Host 或绝对 URL），或已安装识别器读到的 TLS SNI；不因 Hook URL 改写而覆盖原始主机 |
+| `dnsCandidates` | 原始目标 IP 对应的被动 DNS 候选名，最多 4 个；不能证明当前连接实际使用其中某个域名 |
+| `upstream` | 最后选择并尝试打开的上游，可与 `connection.originalDestination` 不同；本地响应或尚未选出目标时为 `null` |
+| `resolvedUpstream` | 成功打开上游时从现有 Socket 观察到的数字 IP/端口；未建连成功或无法读取时为 `null` |
+| `stage` | 最近到达的粗粒度阶段：握手、探测、路由、协议处理、打开上游、转发；不是 HTTP 并发上传/下载的精确阶段或失败归因 |
+| `tcpState` | 最后观察到的 TCP 状态；客户端 RST 保留复位前的状态，UDP 为 `null` |
+| `httpMethod` / `httpPath` / `httpFlowId` | 最近成功解析的 HTTP 请求方法、原始路径和事务 ID；路径不含 query/fragment，不记录 Header 或 Body。聚合失败可能尚未分配 Flow ID |
+| `durationMillis` | 从创建该连接记录到快照的单调时钟耗时；不是某笔 HTTP 或 connect 的耗时 |
+| `bytesFromClient` / `bytesToClient` | TCP 为提交到转发/处理器的有序输入，以及提交到 TCP endpoint 的输出字节数；UDP 为提交转发的数据报 Payload 和接纳的回复 Payload。均不含 IP/TCP/UDP 头，不表示已上网或已被应用 ACK |
+
+HTTP 域名需要请求进入 HTTP 处理器（`hooks` 非空且成功解析请求头）；TLS 域名需要配置中存在相应识别器并成功读到 SNI。80 端口也可能是二进制协议，没有 Host/SNI 时 `host` 保持 `null`。
+
+DNS 关联只观察本 Session 转发的 UDP 53 查询与匹配响应中的 IPv4 A/CNAME，按 TTL 过期，最多保留 1 小时；不反向解析 IP，也不发起额外 DNS 请求。连接创建前的系统缓存、VPN 外的 DNS、TCP DNS、DoH/DoT、IPv6 与加密的 SNI 不会因此变得可见。共享 IP 会产生多个候选，空集合也不意味着目标没有域名。
+
+HTTP 每解析一笔新请求就刷新事务字段并清除旧上游信息；连接级计数继续累计。快照不随后续请求修改，跨线程状态和计数为尽力观测。字段缺失不影响转发。宿主输出日志时还应限制字段长度、转义控制字符，并按业务需求控制路径和异常的可见性。
 
 ## 9. 常见问题与当前边界
 

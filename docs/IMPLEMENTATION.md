@@ -1,6 +1,6 @@
 # 当前实现与验证
 
-日期：2026-11-02。设计基线 v0.5，开发版本 0.1.0-SNAPSHOT，未发布远程。本页记录已实现的行为；目标验收清单见 [ROADMAP.md](ROADMAP.md)。
+日期：2026-11-03。设计基线 v0.5，开发版本 0.1.0-SNAPSHOT，未发布远程。本页记录已实现的行为；目标验收清单见 [ROADMAP.md](ROADMAP.md)。
 
 ## 能力矩阵
 
@@ -9,6 +9,7 @@
 | Kotlin Android Library | :dyltun、:sample、AAR/Maven、本地独立宿主编译 | minSdk 21；运行证据目前集中于 API 34 模拟器 |
 | 根 DSL | dyltunConfig 独立配置、dyltun(fd, config)、行内/可空 Hooks 重载、配置快照与依赖校验 | 扩展对象保留引用，宿主保证共享状态的并发安全 |
 | Session/TUN | FD 接管、状态/有界事件、poll/唤醒、非阻塞关闭、清理异常保留 | API 21–29 要求 Builder 默认非阻塞 FD 或 setBlocking(false) |
+| 连接诊断 | 错误快照、HTTP authority/TLS SNI 来源、被动 DNS 候选、选定/已连接上游、阶段、TCP 状态、方法/路径/Flow ID 与耗时/计数 | 尽力观测；DNS 候选不证明实际域名，不主动反查，不含 query/Header/Body |
 | IPv4/UDP | 长度/校验和/选项、有限分片重组、转发/Redirect/Drop、空包/多响应 | 没有完整 ICMP 错误转换、PMTU、网络切换迁移；不转发 IPv6 |
 | TCP | 独立序列空间、握手、窗口、乱序/重复、RTT/RTO/快速重传、基本拥塞控制、半关闭/RST/TIME_WAIT | 不协商窗口缩放、SACK、时间戳；尚无长期真机/性能结论 |
 | 协议路由 | 开放 inspector/rule SPI、lambda rule、TLS 域名集合/MQTT 值动作自动默认识别器、完整前缀重放 | 显式识别器优先；旧动作块/自定义规则保留依赖校验；探测最多 65,535 字节/1 秒 |
@@ -30,6 +31,7 @@
 - internal.stack：纯 Kotlin TCP endpoint、序列空间、重传、窗口和有界环形缓冲。
 - internal.transport：TCP 与 UDP 各一个 Selector worker，有界发送/接收邮箱。
 - internal.inspection：保留原始前缀的有界探测与多协议元信息。
+- internal.diagnostics：线程安全的连接观察快照、有界 UDP DNS 名称关联；不参与路由或流资源管理。
 - internal.engine：会话、五元组表、预算、唯一 TUN 写入线程与处理器组装。
 - internal.stream：处理器选择、统一 TCP 流端口、有界协程桥接、取消与上游资源归属。
 - internal.protocol.http1：HTTP 处理器适配、增量编解码、Body 策略、Hooks 与本地响应。
@@ -56,6 +58,7 @@ Session 拥有原始 PFD；TunDevice 仅关闭自己的唤醒 socketpair。包�
 | UDP | 128 活跃连接，空闲 30 秒；128 个发送、64 个回复数据报 |
 | IPv4 分片 | 64 组、每组 256 片、4 MiB 内容预算、15 秒绝对超时；重叠整组拒绝 |
 | Session 事件 | 回放 16 项 + 额外 48 项，慢消费者丢最旧项 |
+| 被动 DNS 诊断 | 128 项待匹配查询、10 秒超时；256 项 IP/名称映射、按 TTL 过期且最多 1 小时；每个快照最多 4 个候选 |
 
 TCP 只在实际上游写入或处理器消费后释放应用上传信用。原始 TCP 下行只在应用 ACK 后补充上游读取信用；处理器下行经独立有界队列与 TCP 发送窗口背压。
 
@@ -65,11 +68,17 @@ Body 预算在聚合、连续数组、解压/重编码和模型副本分配前�
 
 REJECT 在聚合阶段、最终响应头尚未发出时返回空 Body 的 413（请求过大）、502（响应过大）、503（Session 预算耗尽）、408/504（请求/响应聚合超时），然后用 FIN 关闭客户端并发出 ConnectionError。引擎错误不进入正常 Hooks，也不继续处理流水请求。畸形 HTTP、Hook 异常或 Hook/本地响应结果超限仍复位所属 TCP，不提交部分修改。
 
+DNS 诊断仅解析本 Session 中匹配的 UDP 53 A/IN 查询与 A/CNAME 回答，单回复最多 64 个回答记录、别名链最多 8 步、单名称最多 128 次遍历。畸形或不匹配内容不进入缓存，原数据报仍按原规则转发。HTTP 诊断在 Hooks 前保存原始 authority、方法和无 query/fragment 的路径；新请求会清空旧上游/Flow ID，晚到的旧 connect 回调不能覆盖新请求。详细计数语义和信息缺失条件见 [API.md](API.md#84-连接错误上下文)。
+
 ## 验证证据
 
-本轮 TCP 处理器边界整理后，136 项 JVM 测试、8 项 API 34 Android 测试均通过，无失败或跳过。保留原有 124 项测试，新增 12 项处理器/资源归属回归，并在完整 HTTP 413/FIN 测试中连续执行 100 次启停。覆盖选择顺序、注册表快照、背压、半关闭、失败隔离、子协程取消、上游关闭竞态、未退出任务容量，以及非 HTTP 测试协议的完整前缀、路由目标和真实 Socket 收发。修复验证中发现的连接完成与停止快照竞态。
+2026-11-03 连接诊断完成后，148 项 JVM 测试、8 项 API 34 Android 测试通过，无失败或跳过。新增 12 项覆盖：HTTP 原始 authority/无 query 路径、事务隔离、旧 connect 回调、TLS SNI 来源、DNS 查询匹配/CNAME/TTL/容量/畸形输入，以及完整包循环中的 HTTP Hook 失败、DNS 后二进制转发与客户端 RST、UDP 建连失败。现有 TLS 阻断回归也核对 SNI 和路由阶段。真实 localhost Socket 测试验证实际路由 peer，未访问外部业务服务器。
 
-与 CI 相同的 145 个 Gradle 任务完成；库/示例 Lint 无错误（仍有 1 / 4 条既有提醒），release AAR、源码包、本地 Maven publication、测试 APK 与示例 APK 构建通过。独立 Android 宿主编译通过；既有 Kotlin 2.2.10 / AGP 8.13.2 宿主的 10 项单元测试和 debug APK 构建通过。公共 API 未变，未增加 MQTT 修改或公共处理器 SPI。本轮未重跑真实 VPN 网络或业务请求，内部契约见 [STREAM_PROCESSORS.md](STREAM_PROCESSORS.md)。
+本轮 CI 对应的构建任务及 connectedDebugAndroidTest 完成，库/示例 Lint 无错误（3 / 4 条版本或示例配置提醒）；release AAR、源码包、本地 Maven、Android 测试与示例 APK 构建通过。上游地址读取兼容 minSdk 21。独立 Android 宿主及更新后的诊断文档示例编译通过；既有 Kotlin 2.2.10 / AGP 8.13.2 宿主两个 flavor 各 14 项测试与 debug APK 构建通过。发布到本地 Maven 的 AAR 与当前 release 产物 SHA-256 一致。本轮未安装业务应用 APK、重启其 VPN 或重跑真实业务请求。
+
+此前 TCP 处理器边界整理后，136 项 JVM 测试、8 项 API 34 Android 测试均通过，无失败或跳过。保留原有 124 项测试，新增 12 项处理器/资源归属回归，并在完整 HTTP 413/FIN 测试中连续执行 100 次启停。覆盖选择顺序、注册表快照、背压、半关闭、失败隔离、子协程取消、上游关闭竞态、未退出任务容量，以及非 HTTP 测试协议的完整前缀、路由目标和真实 Socket 收发。修复验证中发现的连接完成与停止快照竞态。
+
+当时与 CI 相同的 145 个 Gradle 任务完成；库/示例 Lint 无错误（1 / 4 条提醒），release AAR、源码包、本地 Maven publication、测试 APK 与示例 APK 构建通过。独立 Android 宿主编译通过；既有 Kotlin 2.2.10 / AGP 8.13.2 宿主的 10 项单元测试和 debug APK 构建通过。该次整理未改变公共 API，未增加 MQTT 修改或公共处理器 SPI，也未重跑真实 VPN 网络或业务请求。内部契约见 [STREAM_PROCESSORS.md](STREAM_PROCESSORS.md)。
 
 此前兼容性简化完成时，124 项 JVM / 8 项 Android 测试及独立/既有宿主编译通过；新增配置工厂/启动重载、默认识别器优先级、lambda 规则、103 后 EOF 回退与 101 后禁止回退均有验证。拆分、兼容性约束及当时结果见 [REFACTORING.md](REFACTORING.md)。
 

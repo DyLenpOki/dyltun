@@ -6,6 +6,7 @@ import com.dylenpoki.dyltun.internal.stream.StreamConnector
 import com.dylenpoki.dyltun.ConnectionInfo
 import com.dylenpoki.dyltun.DyltunConfig
 import com.dylenpoki.dyltun.ProtocolMetadata
+import com.dylenpoki.dyltun.internal.diagnostics.ConnectionTrace
 import com.dylenpoki.dyltun.internal.engine.MemoryBudget
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.cancelChildren
@@ -31,7 +32,8 @@ internal class Http1Connection(
     clientSink: ByteSink,
     finishOutput: () -> Unit = {},
     private val flowIds: AtomicLong = AtomicLong(),
-    private val report: (Throwable) -> Unit = {}
+    private val report: (Throwable) -> Unit = {},
+    private val trace: ConnectionTrace? = null
 ) {
     private val client = HttpClient(HttpInput(clientSource), clientSink, finishOutput)
     private val responses = HttpResponseWriter(config.bodyLimits.response, checkNotNull(config.hooks), executor, clientSink)
@@ -39,6 +41,7 @@ internal class Http1Connection(
     suspend fun run() {
         while (currentCoroutineContext().isActive) {
             val head = HttpFraming.request(client.input) ?: return
+            trace?.httpRequest(head.method, head.url)
             when (exchange(head)) {
                 ExchangeResult.KEEP_ALIVE -> Unit
                 ExchangeResult.CLOSE, ExchangeResult.UPGRADED -> return
@@ -49,7 +52,7 @@ internal class Http1Connection(
     private suspend fun exchange(head: RequestHead): ExchangeResult = coroutineScope {
         BodyAccount(budget).use { account ->
             try {
-                HttpExchange(config, connection, metadata, executor, connector, client, responses, flowIds, report)
+                HttpExchange(config, connection, metadata, executor, connector, client, responses, flowIds, report, trace)
                     .run(head, account, this)
             } finally {
                 coroutineContext.cancelChildren()

@@ -2,9 +2,11 @@ package com.dylenpoki.dyltun.internal.transport
 
 import com.dylenpoki.dyltun.Endpoint
 import com.dylenpoki.dyltun.internal.android.StreamConnector
+import com.dylenpoki.dyltun.internal.diagnostics.ConnectionTrace
 import com.dylenpoki.dyltun.internal.stack.TcpEndpoint
 import java.io.Closeable
 import java.io.IOException
+import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
@@ -22,7 +24,9 @@ internal class TcpForwarder(
     private val wakeup: () -> Unit,
     private val fatal: (Throwable) -> Unit
 ) : Closeable {
-    inner class Handle internal constructor(val id: Long, internal val destination: Endpoint) : Closeable {
+    inner class Handle internal constructor(
+        val id: Long, internal val destination: Endpoint, private val onConnected: (Endpoint?) -> Unit
+    ) : Closeable {
         internal val writes = ArrayBlockingQueue<ByteArray>(8)
         internal val reads = ArrayBlockingQueue<ByteArray>(4)
         internal val credit = AtomicInteger(TcpEndpoint.SEND_CAPACITY)
@@ -38,6 +42,12 @@ internal class TcpForwarder(
         val failure = AtomicReference<Throwable?>()
         internal val changed = Channel<Unit>(Channel.CONFLATED)
         internal fun signal() { changed.trySend(Unit); wakeup() }
+        internal fun connected(socket: SocketChannel) {
+            connected = true
+            val address = socket.socket().remoteSocketAddress as? InetSocketAddress
+            onConnected(address?.address?.hostAddress?.let { Endpoint(it, address.port) })
+            signal()
+        }
 
         fun send(bytes: ByteArray): Boolean {
             require(bytes.size <= 16384)
@@ -78,10 +88,11 @@ internal class TcpForwarder(
 
     fun start() { try { worker.start() } catch (error: Throwable) { selector.close(); throw error } }
 
-    fun open(id: Long, destination: Endpoint): Handle {
+    fun open(id: Long, destination: Endpoint, trace: ConnectionTrace? = null): Handle {
+        val onConnected = trace?.beginUpstream(destination) ?: {}
         check(!stopped.get())
         check(handles.size < 64) { "TCP upstream connection limit reached" }
-        val handle = Handle(id, destination)
+        val handle = Handle(id, destination, onConnected)
         check(handles.putIfAbsent(id, handle) == null)
         selector.wakeup()
         return handle
@@ -102,7 +113,7 @@ internal class TcpForwarder(
                     val handle = peer.handle
                     if (handle.closing.get()) continue
                     try {
-                        if (key.isConnectable && peer.socket.finishConnect()) { handle.connected = true; handle.signal() }
+                        if (key.isConnectable && peer.socket.finishConnect()) handle.connected(peer.socket)
                         if (key.isValid && key.isWritable) write(peer)
                         if (key.isValid && key.isReadable && handle.credit.get() > 0 && handle.reads.remainingCapacity() > 0) {
                             scratch.clear()
@@ -147,8 +158,7 @@ internal class TcpForwarder(
                     val peer = Peer(handle, socket, key, System.nanoTime())
                     peers[handle.id] = peer
                     key.attach(peer)
-                    handle.connected = socket.isConnected
-                    handle.signal()
+                    if (socket.isConnected) handle.connected(socket) else handle.signal()
                 }
                 val peer = peers[handle.id] ?: continue
                 if (!peer.socket.isOpen) continue // Both directions finished; endpoint still awaits its FIN ACK.

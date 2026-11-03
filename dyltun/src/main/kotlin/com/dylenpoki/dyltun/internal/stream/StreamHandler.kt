@@ -2,6 +2,7 @@ package com.dylenpoki.dyltun.internal.stream
 
 import com.dylenpoki.dyltun.ConnectionInfo
 import com.dylenpoki.dyltun.Endpoint
+import com.dylenpoki.dyltun.internal.diagnostics.ConnectionTrace
 import com.dylenpoki.dyltun.internal.inspection.ProtocolDetection
 import java.io.Closeable
 
@@ -27,7 +28,8 @@ internal class StreamContext(
     val sink: ByteSink,
     val finishOutput: () -> Unit,
     val upstream: StreamConnector,
-    val report: (Throwable) -> Unit
+    val report: (Throwable) -> Unit,
+    val trace: ConnectionTrace
 )
 
 /** Packet-loop port. All methods are nonblocking; only the runtime task uses suspend I/O. */

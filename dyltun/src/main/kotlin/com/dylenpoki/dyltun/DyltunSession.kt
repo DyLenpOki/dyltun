@@ -20,6 +20,10 @@ sealed interface DyltunState {
 }
 
 sealed interface DyltunEvent {
-    data class ConnectionError(val connection: ConnectionInfo?, val cause: Throwable) : DyltunEvent
+    data class ConnectionError @JvmOverloads constructor(
+        val connection: ConnectionInfo?,
+        val cause: Throwable,
+        val diagnostics: ConnectionDiagnostics = ConnectionDiagnostics()
+    ) : DyltunEvent
     data class PacketRejected(val reason: String) : DyltunEvent
 }

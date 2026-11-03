@@ -1,6 +1,7 @@
 package com.dylenpoki.dyltun.internal.stream
 
 import com.dylenpoki.dyltun.Endpoint
+import com.dylenpoki.dyltun.internal.diagnostics.ConnectionTrace
 import com.dylenpoki.dyltun.internal.transport.TcpForwarder
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicLong
@@ -8,10 +9,13 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
 /** Processed streams release upstream credit on consumption; output has its own bounded queue. */
-internal class ForwarderStreamConnector(private val forwarder: TcpForwarder) : StreamConnector {
-    private val ids = AtomicLong()
+internal class ForwarderStreamConnector(
+    private val forwarder: TcpForwarder,
+    private val ids: AtomicLong,
+    private val trace: ConnectionTrace
+) : StreamConnector {
 
-    override fun open(endpoint: Endpoint): StreamPeer = Peer(forwarder.open(ids.decrementAndGet(), endpoint))
+    override fun open(endpoint: Endpoint): StreamPeer = Peer(forwarder.open(ids.decrementAndGet(), endpoint, trace))
 
     private class Peer(private val handle: TcpForwarder.Handle) : StreamPeer {
         override val source = ByteSource {

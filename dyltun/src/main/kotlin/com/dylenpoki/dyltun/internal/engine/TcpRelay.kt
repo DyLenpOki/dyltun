@@ -1,12 +1,15 @@
 package com.dylenpoki.dyltun.internal.engine
 
 import com.dylenpoki.dyltun.ConnectionInfo
+import com.dylenpoki.dyltun.ConnectionStage
 import com.dylenpoki.dyltun.DyltunConfig
 import com.dylenpoki.dyltun.DyltunEvent
 import com.dylenpoki.dyltun.RoutingContext
 import com.dylenpoki.dyltun.RoutingDecision
 import com.dylenpoki.dyltun.RoutingEvaluator
 import com.dylenpoki.dyltun.TransportProtocol
+import com.dylenpoki.dyltun.internal.diagnostics.ConnectionTrace
+import com.dylenpoki.dyltun.internal.diagnostics.DnsNames
 import com.dylenpoki.dyltun.internal.inspection.ProtocolProbe
 import com.dylenpoki.dyltun.internal.packet.PacketWriter
 import com.dylenpoki.dyltun.internal.packet.TcpPacket
@@ -31,10 +34,11 @@ internal class TcpRelay(
     private val nextId: () -> Long,
     private val packetId: () -> Int,
     private val clock: MonotonicClock = MonotonicClock.SYSTEM,
-    private val initialSequence: () -> Long = secureSequenceGenerator()
+    private val initialSequence: () -> Long = secureSequenceGenerator(),
+    private val dns: DnsNames = DnsNames(clock)
 ) : Closeable {
     private data class Tuple(val source: Int, val destination: Int, val sourcePort: Int, val destinationPort: Int)
-    private class Flow(val connection: ConnectionInfo, val endpoint: TcpEndpoint) {
+    private class Flow(val connection: ConnectionInfo, val endpoint: TcpEndpoint, val trace: ConnectionTrace) {
         var probe: ProtocolProbe? = null
         var session: StreamSession? = null
         var committedInput = 0
@@ -57,6 +61,8 @@ internal class TcpRelay(
                 return
             }
             val info = ConnectionInfo(nextId(), TransportProtocol.TCP, address(tuple.source), tuple.sourcePort, address(tuple.destination), tuple.destinationPort)
+            val trace = ConnectionTrace(info, { dns.candidates(requireNotNull(info.destinationAddress.hostAddress)) }, clock)
+            trace.stage(ConnectionStage.HANDSHAKE)
             try {
                 if (RoutingEvaluator.evaluate(config.routing, RoutingContext(info)) == RoutingDecision.Reset) {
                     PacketWriter.reset(packet, packetId())?.let(write)
@@ -68,18 +74,21 @@ internal class TcpRelay(
                         output.sequence, output.acknowledgement, output.flags, output.window, output.payload, packetId(), output.mss))
                 }, { count -> flows[tuple]?.session?.acknowledgeOutput(count) }, { cause ->
                     flows[tuple]?.session?.close()
-                    if (cause != null) emit(DyltunEvent.ConnectionError(info, cause))
+                    if (cause != null) emit(DyltunEvent.ConnectionError(info, cause, trace.snapshot()))
                 }, (mtu.coerceIn(68, 65535) - 40).coerceAtMost(1460))
-                flow = Flow(info, endpoint)
+                flow = Flow(info, endpoint, trace)
                 flows[tuple] = flow
                 endpoint.start()
             } catch (error: Exception) {
-                emit(DyltunEvent.ConnectionError(info, error))
+                emit(DyltunEvent.ConnectionError(info, error, trace.snapshot()))
                 flows.remove(tuple)
                 PacketWriter.reset(packet, packetId())?.let(write)
                 return
             }
-        } else flow.endpoint.accept(packet)
+        } else {
+            flow.trace.tcpState(flow.endpoint.state.name)
+            flow.endpoint.accept(packet)
+        }
         advance(flow)
     }
 
@@ -87,6 +96,7 @@ internal class TcpRelay(
         val iterator = flows.values.iterator()
         while (iterator.hasNext()) {
             val flow = iterator.next()
+            flow.trace.tcpState(flow.endpoint.state.name)
             flow.endpoint.tick()
             advance(flow)
             if (flow.endpoint.state == TcpState.CLOSED && flow.endpoint.transportClosed) iterator.remove()
@@ -96,12 +106,16 @@ internal class TcpRelay(
     private fun advance(flow: Flow) {
         val tcp = flow.endpoint
         if (!tcp.handshakeComplete || tcp.transportClosed) return
+        flow.trace.tcpState(tcp.state.name)
         try {
             var session = flow.session
             if (session == null) {
+                flow.trace.stage(ConnectionStage.INSPECTION)
                 val probe = flow.probe ?: streams.probe(flow.connection, clock).also { flow.probe = it }
                 if (!probe.advance(tcp.peekClient(ProtocolProbe.MAX_PREFIX), tcp.clientFinished)) return
                 val detection = probe.result
+                flow.trace.detected(detection)
+                flow.trace.stage(ConnectionStage.ROUTING)
                 val metadata = detection.metadata
                 val context = RoutingContext(flow.connection, metadata.firstOrNull(), detectedProtocols = metadata)
                 val destination = when (val decision = RoutingEvaluator.evaluate(config.routing, context)) {
@@ -109,7 +123,7 @@ internal class TcpRelay(
                     is RoutingDecision.Redirect -> decision.destination
                     else -> flow.connection.originalDestination
                 }
-                session = streams.open(flow.connection, destination, detection)
+                session = streams.open(flow.connection, destination, detection, flow.trace)
                 flow.session = session
                 flow.probe = null
             }
@@ -130,7 +144,10 @@ internal class TcpRelay(
         repeat(4) {
             if (tcp.terminal || flow.receivedEof) return@repeat
             val bytes = session.peekOutput()
-            if (bytes != null && tcp.offerServer(bytes)) session.commitOutput()
+            if (bytes != null && tcp.offerServer(bytes)) {
+                session.commitOutput()
+                flow.trace.serverBytes(bytes.size)
+            }
         }
         if (session.outputDrained && !flow.receivedEof) { flow.receivedEof = true; tcp.finishServer() }
         if (session.completed) {
@@ -144,7 +161,10 @@ internal class TcpRelay(
         repeat(4) {
             if (tcp.clientAvailable == 0) return@repeat
             val bytes = tcp.peekClient(CHUNK_BYTES)
-            if (session.accept(bytes)) { tcp.commitClient(bytes.size); flow.committedInput += bytes.size }
+            if (session.accept(bytes)) {
+                tcp.commitClient(bytes.size); flow.committedInput += bytes.size
+                flow.trace.clientBytes(bytes.size)
+            }
         }
         if (tcp.clientFinished && tcp.clientAvailable == 0 && !flow.sentEof) { session.finishInput(); flow.sentEof = true }
     }

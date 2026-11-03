@@ -158,7 +158,10 @@ flowchart TD
 | HttpExchange | 单次请求、本地/上游分支、错误恢复阶段与升级 |
 | HttpResponseWriter | 响应 Hook、Body 准备、编码与输出 |
 | HookExecutor | 受限工作执行器，运行宿主的同步 HTTP Hooks |
+| ConnectionTrace / DnsNames | 记录连接诊断与有界被动 DNS 候选，错误时生成快照；不参与路由 |
 
 协议处理器不直接操作 TUN 或 TCP 序列号。内部已有通用 TCP 处理边界；公共扩展仍为 ProtocolInspector / ConnectionRule，尚无公共内容处理器注册接口。
+
+诊断沿上述数据路径收集：UDP 53 查询/回复 → DNS 候选；协议探测 → SNI/协议；HTTP 请求解析 → 原始 authority、方法与无 query 的路径；上游连接 → 选定目标与实际 peer。任一连接错误附加当前快照，原有转发与关闭分支不变。字段语义见 [API.md](API.md#84-连接错误上下文)。
 
 公开配置和使用方式见 [API.md](API.md)，行为约束见 [DESIGN.md](DESIGN.md)。

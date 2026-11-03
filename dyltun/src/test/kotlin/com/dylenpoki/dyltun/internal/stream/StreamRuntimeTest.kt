@@ -1,6 +1,7 @@
 package com.dylenpoki.dyltun.internal.stream
 
 import com.dylenpoki.dyltun.ConnectionInfo
+import com.dylenpoki.dyltun.ConnectionStage
 import com.dylenpoki.dyltun.Endpoint
 import com.dylenpoki.dyltun.ProtocolId
 import com.dylenpoki.dyltun.ProtocolMetadata
@@ -46,6 +47,7 @@ class StreamRuntimeTest {
             assertEquals(target, context.destination)
             assertEquals(80, context.connection.destinationPort)
             assertEquals(detection.metadata, context.detection.metadata)
+            assertEquals(ConnectionStage.PROCESSING, context.trace.snapshot().stage)
             context.sink.write("selected".toByteArray())
         }
         val second = handler { error("A later matching handler replaced the first") }
@@ -302,7 +304,7 @@ class StreamRuntimeTest {
     ) : Closeable {
         private val forwarder = TcpForwarder(
             com.dylenpoki.dyltun.internal.android.StreamConnector { error("Unexpected transport connection") }, {}, { throw it })
-        val runtime = StreamRuntime(dyltunConfig().protocols, forwarder, {}, { _, _ -> }, handlers, upstream)
+        val runtime = StreamRuntime(dyltunConfig().protocols, forwarder, {}, {}, handlers, upstream)
         fun open(id: Long = 1): StreamSession = runtime.open(info(id), target, detection)
         override fun close() { try { runtime.close() } finally { forwarder.close() } }
     }

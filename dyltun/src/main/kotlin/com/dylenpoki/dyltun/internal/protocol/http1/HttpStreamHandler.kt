@@ -16,7 +16,7 @@ internal class HttpStreamHandler(private val config: DyltunConfig) : StreamHandl
     override fun matches(detection: ProtocolDetection): Boolean = detection.http1
     override suspend fun handle(context: StreamContext) {
         Http1Connection(config, context.connection, context.detection.metadata, budget, hooks, context.upstream,
-            context.source, context.sink, context.finishOutput, ids, context.report).run()
+            context.source, context.sink, context.finishOutput, ids, context.report, context.trace).run()
     }
     override fun requestStop() { hooks.requestStop() }
     override fun close() { hooks.close() }

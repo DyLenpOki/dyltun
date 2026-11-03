@@ -8,7 +8,7 @@
 
 **当前状态：实验性版本 `0.1.0-SNAPSHOT`，API 可能调整。** IPv4 TCP/UDP、明文 HTTP/1.1 修改与本地响应已接通，TLS SNI 阻断和 MQTT 重定向已参与实际运行。尚未完成多版本真机、长期负载与稳定版本验收。
 
-支持 request/response Hooks、HttpResponse.make、上游失败时的 error Hook 回退、identity/gzip、Body 方向/总预算及超限流式回退。本轮 136 项 JVM 测试和 8 项 API 34 Android 测试通过；此前真实 VPN 验证 TCP/UDP DNS 和 HTTP 本地响应。实现范围、资源上限和验证见 [IMPLEMENTATION.md](docs/IMPLEMENTATION.md)。
+支持 request/response Hooks、HttpResponse.make、上游失败时的 error Hook 回退、identity/gzip、Body 方向/总预算及超限流式回退。连接错误附带 HTTP Host/TLS SNI、被动 DNS 候选、上游目标、阶段和计数。本轮 148 项 JVM 测试和 8 项 API 34 Android 测试通过；此前真实 VPN 验证 TCP/UDP DNS 和 HTTP 本地响应。实现范围、资源上限和验证见 [IMPLEMENTATION.md](docs/IMPLEMENTATION.md)。
 
 接入自己的 Android 应用，请从 [API 使用文档](docs/API.md) 开始，包含依赖配置、VpnService 初始化和可复制的调用示例。
 

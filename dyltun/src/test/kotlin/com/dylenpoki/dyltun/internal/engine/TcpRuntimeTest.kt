@@ -4,6 +4,7 @@ import com.dylenpoki.dyltun.BodyLimit
 import com.dylenpoki.dyltun.BodyLimits
 import com.dylenpoki.dyltun.BodyOverflow
 import com.dylenpoki.dyltun.ConnectionRule
+import com.dylenpoki.dyltun.ConnectionStage
 import com.dylenpoki.dyltun.DyltunConfig
 import com.dylenpoki.dyltun.DyltunEvent
 import com.dylenpoki.dyltun.DyltunState
@@ -11,6 +12,7 @@ import com.dylenpoki.dyltun.Endpoint
 import com.dylenpoki.dyltun.HttpFlow
 import com.dylenpoki.dyltun.HttpHooks
 import com.dylenpoki.dyltun.HttpResponse
+import com.dylenpoki.dyltun.HostSource
 import com.dylenpoki.dyltun.MqttInspector
 import com.dylenpoki.dyltun.InspectionContext
 import com.dylenpoki.dyltun.InspectionResult
@@ -24,6 +26,7 @@ import com.dylenpoki.dyltun.TlsClientHelloInspector
 import com.dylenpoki.dyltun.internal.android.DatagramConnector
 import com.dylenpoki.dyltun.internal.android.PacketDevice
 import com.dylenpoki.dyltun.internal.android.StreamConnector
+import com.dylenpoki.dyltun.internal.diagnostics.DnsPackets
 import com.dylenpoki.dyltun.internal.inspection.ProtocolDetection
 import com.dylenpoki.dyltun.internal.packet.Ipv4Packet
 import com.dylenpoki.dyltun.internal.packet.PacketWriter
@@ -44,10 +47,14 @@ import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.IOException
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.nio.channels.SocketChannel
+import java.nio.channels.DatagramChannel
 import java.nio.ByteBuffer
 import java.util.TreeMap
 import java.util.concurrent.Executors
@@ -60,6 +67,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -155,6 +163,13 @@ class TcpRuntimeTest {
             client.sendAt(17, hello.copyOfRange(17, hello.size))
             harness.until { client.reset }
             assertEquals(0, attempts.get())
+            val event = runBlocking { withTimeout(3000) {
+                harness.session.events.first { it is DyltunEvent.ConnectionError }
+            } } as DyltunEvent.ConnectionError
+            assertEquals("www.blocked.example.com", event.diagnostics.host)
+            assertEquals(HostSource.TLS_SNI, event.diagnostics.hostSource)
+            assertEquals(ConnectionStage.ROUTING, event.diagnostics.stage)
+            assertNull(event.diagnostics.upstream)
         }
     }
 
@@ -398,6 +413,83 @@ class TcpRuntimeTest {
         }
     }
 
+    @Test fun httpFailureIncludesAuthorityPathAndFlowWithoutQuery() {
+        val config = DyltunConfig.Builder().apply {
+            hooks = object : HttpHooks {
+                override fun request(flow: HttpFlow) { throw IOException("test Hook failure") }
+            }
+        }.build()
+        Harness(config, StreamConnector { error("Hook failure opened upstream") }).use { harness ->
+            val client = harness.connect()
+            val request = "GET /gapp?key=secret HTTP/1.1\r\nHost: api.example.com\r\n\r\n".toByteArray()
+            client.sendAt(0, request)
+            harness.until { client.reset }
+            val event = runBlocking { withTimeout(3000) {
+                harness.session.events.first { it is DyltunEvent.ConnectionError }
+            } } as DyltunEvent.ConnectionError
+            assertEquals("test Hook failure", event.cause.message)
+            val details = event.diagnostics
+            assertEquals("http/1.1", details.protocol)
+            assertEquals("api.example.com", details.host)
+            assertEquals(HostSource.HTTP_AUTHORITY, details.hostSource)
+            assertEquals("GET", details.httpMethod)
+            assertEquals("/gapp", details.httpPath)
+            assertTrue(checkNotNull(details.httpFlowId) > 0)
+            assertEquals(ConnectionStage.PROCESSING, details.stage)
+            assertEquals("ESTABLISHED", details.tcpState)
+            assertEquals(request.size.toLong(), details.bytesFromClient)
+            assertNull(details.upstream)
+        }
+    }
+
+    @Test fun binaryResetIncludesObservedDnsCandidateAndActualRoutedPeer() {
+        ServerSocket(0, 1, loopback).use { tcp ->
+            DatagramSocket(tcp.localPort, loopback).use { dns ->
+                tcp.soTimeout = 3000; dns.soTimeout = 3000
+                Harness(redirect(tcp.localPort), StreamConnector(::channel), datagrams = DatagramConnector { endpoint ->
+                    DatagramChannel.open().apply { connect(InetSocketAddress(endpoint.host, endpoint.port)) }
+                }).use { harness ->
+                    val host = "accs.example.com"
+                    val query = DnsPackets.query(host)
+                    harness.device.incoming.offer(PacketWriter.udp(0x0a000002, 0xc0000235.toInt(), 12346, 53, query, 0))
+                    val received = DatagramPacket(ByteArray(2048), 2048)
+                    dns.receive(received)
+                    assertArrayEquals(query, received.data.copyOf(received.length))
+                    val answer = DnsPackets.response(host)
+                    dns.send(DatagramPacket(answer, answer.size, received.socketAddress))
+                    val packet = Ipv4Packet.parse(checkNotNull(harness.device.outgoing.poll(3, TimeUnit.SECONDS)))
+                    assertEquals(17, packet.protocol)
+                    assertArrayEquals(answer, packet.bytes.copyOfRange(packet.udp().payloadOffset, packet.length))
+                    val client = harness.connect()
+                    val binary = byteArrayOf(0xf1.toByte(), 0, 0, 1, 7)
+                    client.sendAt(0, binary); client.position += binary.size
+                    tcp.accept().use { upstream ->
+                        upstream.soTimeout = 3000
+                        assertArrayEquals(binary, ByteArray(binary.size).also { DataInputStream(upstream.getInputStream()).readFully(it) })
+                        upstream.getOutputStream().write(byteArrayOf(8, 9))
+                        harness.until { client.body.size() == 2 }
+                        client.transmit(client.position, 0, RST)
+                        val event = runBlocking { withTimeout(3000) {
+                            harness.session.events.first { it is DyltunEvent.ConnectionError }
+                        } } as DyltunEvent.ConnectionError
+                        assertEquals("Client reset TCP connection", event.cause.message)
+                        val details = event.diagnostics
+                        assertEquals("tcp", details.protocol)
+                        assertNull(details.host)
+                        assertNull(details.hostSource)
+                        assertEquals(listOf(host), details.dnsCandidates)
+                        assertEquals(Endpoint("127.0.0.1", tcp.localPort), details.upstream)
+                        assertEquals(details.upstream, details.resolvedUpstream)
+                        assertEquals(ConnectionStage.FORWARDING, details.stage)
+                        assertEquals("ESTABLISHED", details.tcpState)
+                        assertEquals(binary.size.toLong(), details.bytesFromClient)
+                        assertEquals(2L, details.bytesToClient)
+                    }
+                }
+            }
+        }
+    }
+
     private fun redirect(port: Int) = DyltunConfig.Builder().apply {
         routing { rule(object : ConnectionRule {
             override fun evaluate(context: RoutingContext) = RoutingDecision.Redirect(Endpoint("127.0.0.1", port))
@@ -417,18 +509,21 @@ class TcpRuntimeTest {
             bytes.copyInto(buffer)
             return bytes.size
         }
-        override fun write(packet: ByteArray) { if (!drop(Ipv4Packet.parse(packet).tcp())) outgoing.offer(packet.copyOf()) }
+        override fun write(packet: ByteArray) {
+            val ip = Ipv4Packet.parse(packet)
+            if (ip.protocol != 6 || !drop(ip.tcp())) outgoing.offer(packet.copyOf())
+        }
         override fun wakeup() { incoming.offer(byteArrayOf()) }
         override fun close() { wakeup() }
     }
 
     private class Harness(
-        config: DyltunConfig, connector: StreamConnector, createHandlers: (() -> List<StreamHandler>)? = null
+        config: DyltunConfig, connector: StreamConnector, createHandlers: (() -> List<StreamHandler>)? = null,
+        datagrams: DatagramConnector = DatagramConnector { error("Unexpected UDP") }
     ) : Closeable {
         val device = Device()
         private val clients = mutableMapOf<Int, Client>()
         val session = ManagedSession(Closeable {}) { emit ->
-            val datagrams = DatagramConnector { error("Unexpected UDP") }
             if (createHandlers == null) IpPacketRuntime(device, config, datagrams, emit, connector)
             else IpPacketRuntime(device, config, datagrams, emit, connector, createHandlers)
         }.also { it.start() }

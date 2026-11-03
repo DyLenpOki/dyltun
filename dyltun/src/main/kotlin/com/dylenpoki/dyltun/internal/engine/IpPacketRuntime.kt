@@ -1,6 +1,7 @@
 package com.dylenpoki.dyltun.internal.engine
 
 import com.dylenpoki.dyltun.ConnectionInfo
+import com.dylenpoki.dyltun.ConnectionStage
 import com.dylenpoki.dyltun.DyltunConfig
 import com.dylenpoki.dyltun.DyltunEvent
 import com.dylenpoki.dyltun.Endpoint
@@ -11,6 +12,8 @@ import com.dylenpoki.dyltun.TransportProtocol
 import com.dylenpoki.dyltun.internal.android.DatagramConnector
 import com.dylenpoki.dyltun.internal.android.PacketDevice
 import com.dylenpoki.dyltun.internal.android.StreamConnector
+import com.dylenpoki.dyltun.internal.diagnostics.ConnectionTrace
+import com.dylenpoki.dyltun.internal.diagnostics.DnsNames
 import com.dylenpoki.dyltun.internal.packet.Ipv4Packet
 import com.dylenpoki.dyltun.internal.packet.Ipv4Reassembler
 import com.dylenpoki.dyltun.internal.packet.PacketWriter
@@ -42,9 +45,10 @@ internal class IpPacketRuntime(
     private val stopped = AtomicBoolean()
     private val failure = AtomicReference<Throwable?>()
     private val replies = ArrayBlockingQueue<UdpReply>(64)
-    private data class Flow(val connection: ConnectionInfo, val endpoint: Endpoint, var touched: Long)
+    private data class Flow(val connection: ConnectionInfo, val endpoint: Endpoint, var touched: Long, val trace: ConnectionTrace)
     private val connections = linkedMapOf<UdpTuple, Flow>()
     private val fragments = Ipv4Reassembler()
+    private val dns = DnsNames()
     private var nextConnection = 0L
     private var packetId = 0
     @Volatile private var forwarder: UdpForwarder? = null
@@ -69,9 +73,9 @@ internal class IpPacketRuntime(
         tcpForwarder = tcp
         tcp.start()
         val streams = StreamRuntime(config.protocols, tcp, device::wakeup,
-            { connection, error -> emit(DyltunEvent.ConnectionError(connection, error)) }, createHandlers())
+            emit, createHandlers())
         streamRuntime = streams
-        val relay = TcpRelay(config, streams, device::write, emit, { ++nextConnection }, { packetId++ })
+        val relay = TcpRelay(config, streams, device::write, emit, { ++nextConnection }, { packetId++ }, dns = dns)
         tcpRelay = relay
         val buffer = ByteArray(65535)
         onReady()
@@ -109,19 +113,28 @@ internal class IpPacketRuntime(
             ++nextConnection, TransportProtocol.UDP, address(tuple.source), tuple.sourcePort,
             address(tuple.destination), tuple.destinationPort
         )
+        val trace = existing?.trace ?: ConnectionTrace(connection, {
+            dns.candidates(requireNotNull(connection.destinationAddress.hostAddress))
+        })
         try {
+            if (existing == null) trace.stage(ConnectionStage.ROUTING)
             val endpoint = existing?.endpoint ?: when (val decision = RoutingEvaluator.evaluate(config.routing, RoutingContext(connection))) {
                 RoutingDecision.Drop -> return
                 is RoutingDecision.Redirect -> decision.destination
                 else -> connection.originalDestination
             }
             if (existing == null && connections.size >= 128) throw IOException("UDP connection limit reached")
-            val flow = existing ?: Flow(connection, endpoint, System.nanoTime()).also { connections[tuple] = it }
+            val flow = existing ?: Flow(connection, endpoint, System.nanoTime(), trace).also {
+                trace.beginUpstream(endpoint)
+                connections[tuple] = it
+            }
             flow.touched = System.nanoTime()
             val payload = packet.bytes.copyOfRange(datagram.payloadOffset, packet.length)
-            udp.send(UdpRequest(tuple, connection, endpoint, payload))
+            trace.clientBytes(payload.size)
+            if (tuple.destinationPort == 53) dns.query(connection.id, payload)
+            udp.send(UdpRequest(tuple, connection, endpoint, payload, trace))
         } catch (error: Exception) {
-            emit(DyltunEvent.ConnectionError(connection, error))
+            emit(DyltunEvent.ConnectionError(connection, error, trace.snapshot()))
         }
     }
 
@@ -132,10 +145,12 @@ internal class IpPacketRuntime(
             val flow = connections[key] ?: return@repeat
             if (flow.connection.id != reply.connectionId) return@repeat
             if (reply.payload.size > 65507) {
-                emit(DyltunEvent.ConnectionError(flow.connection, IOException("Reply exceeds IPv4 UDP maximum")))
+                emit(DyltunEvent.ConnectionError(flow.connection, IOException("Reply exceeds IPv4 UDP maximum"), flow.trace.snapshot()))
                 return@repeat
             }
             flow.touched = System.nanoTime()
+            flow.trace.serverBytes(reply.payload.size)
+            if (key.destinationPort == 53) dns.response(flow.connection.id, reply.payload)
             val packet = PacketWriter.udp(key.destination, key.source, key.destinationPort, key.sourcePort, reply.payload, packetId++)
             val mtu = try { NetworkInterface.getByInetAddress(address(key.source))?.mtu ?: 1500 } catch (_: Exception) { 1500 }
             PacketWriter.fragments(packet, mtu.coerceIn(68, 65535)).forEach(device::write)
@@ -161,6 +176,7 @@ internal class IpPacketRuntime(
         }
         replies.clear()
         connections.clear()
+        dns.clear()
         failure?.let { throw it }
     }
 

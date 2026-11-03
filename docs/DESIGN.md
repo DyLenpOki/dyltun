@@ -206,6 +206,8 @@ TCP/IP 后端位于 internal.stack / packet，由 IpPacketRuntime 和 TcpRelay �
 
 头部、探测前缀、分片、TCP/UDP 缓冲和连接数量有独立的内部有限预算，当前数值记录在 IMPLEMENTATION.md，不增加公开根 DSL 字段。错误通过 DyltunSession.events 观察，终止原因保留在 state。
 
+连接诊断由 internal.diagnostics 独立维护：ConnectionTrace 记录最近识别结果、HTTP 原始 authority/路径、选定与已连接上游、阶段、TCP 状态和计数；报错时生成 ConnectionError.diagnostics 快照。DnsNames 仅被动关联本 Session 的 UDP DNS A/CNAME，并将结果作为独立候选列表，不能替代 HTTP Host/TLS SNI。诊断不持有 Body、不发起反向 DNS、不参与路由或改变资源归属，缓存有 TTL 和数量上限。字段及可见性边界见 [API.md](API.md#84-连接错误上下文)。
+
 停止时禁止新连接、唤醒等待、关闭 I/O，再清理任务和缓冲；晚到事件带连接代次校验。默认不记录 Body。空 Hooks 且无内容策略时不启动完整 HTTP 解析或 Body 聚合。
 
 ## 8. 验证与变更规则

@@ -16,6 +16,7 @@ Created by GPT 6.1 Sol in extra-high reasoning mode.
 - Per-direction encoded/decoded body limits, buffering deadlines and a session-wide body budget.
 - TLS ClientHello/SNI matching with domain collections and MQTT CONNECT-based redirection.
 - Protocol inspection and routing interfaces for application-specific extensions.
+- Connection-error context with HTTP Host/TLS SNI, passive DNS candidates, upstream endpoints, stage and byte counts.
 
 The library owns packet processing and forwarding. The host application owns VPN consent, the foreground service, TUN configuration and application selection.
 

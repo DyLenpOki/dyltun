@@ -1,11 +1,14 @@
 package com.dylenpoki.dyltun.internal.transport
 
 import com.dylenpoki.dyltun.ConnectionInfo
+import com.dylenpoki.dyltun.ConnectionDiagnostics
 import com.dylenpoki.dyltun.DyltunEvent
 import com.dylenpoki.dyltun.Endpoint
 import com.dylenpoki.dyltun.internal.android.DatagramConnector
+import com.dylenpoki.dyltun.internal.diagnostics.ConnectionTrace
 import java.io.Closeable
 import java.io.IOException
+import java.net.InetSocketAddress
 import java.net.SocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
@@ -15,7 +18,12 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal data class UdpTuple(val source: Int, val destination: Int, val sourcePort: Int, val destinationPort: Int)
-internal data class UdpRequest(val tuple: UdpTuple, val connection: ConnectionInfo, val endpoint: Endpoint, val payload: ByteArray)
+internal data class UdpRequest(
+    val tuple: UdpTuple, val connection: ConnectionInfo, val endpoint: Endpoint, val payload: ByteArray,
+    val trace: ConnectionTrace? = null
+) {
+    fun error(cause: Throwable) = DyltunEvent.ConnectionError(connection, cause, trace?.snapshot() ?: ConnectionDiagnostics())
+}
 internal data class UdpReply(val tuple: UdpTuple, val connectionId: Long, val payload: ByteArray)
 
 /** All channel/session state belongs to one selector thread. */
@@ -42,7 +50,7 @@ internal class UdpForwarder(
 
     fun send(request: UdpRequest) {
         if (stopped.get()) return
-        if (!requests.offer(request)) emit(DyltunEvent.ConnectionError(request.connection, IOException("UDP send queue is full")))
+        if (!requests.offer(request)) emit(request.error(IOException("UDP send queue is full")))
         selector.wakeup()
     }
 
@@ -70,7 +78,7 @@ internal class UdpForwarder(
                         val bytes = ByteArray(receive.remaining()).also { receive.get(it) }
                         reply(UdpReply(session.request.tuple, session.request.connection.id, bytes))
                     } catch (error: Exception) {
-                        emit(DyltunEvent.ConnectionError(session.request.connection, error))
+                        emit(session.request.error(error))
                         remove(Key(session.request.tuple, session.request.connection.id))
                     }
                 }
@@ -92,6 +100,7 @@ internal class UdpForwarder(
             sessions.keys.filter { it.tuple == request.tuple && it != key }.toList().forEach(::remove)
             val session = sessions[key] ?: run {
                 check(sessions.size < 128) { "UDP connection limit reached" }
+                val onConnected = request.trace?.beginUpstream(request.endpoint)
                 val channel = connector.connect(request.endpoint)
                 try {
                     val peer = channel.socket().remoteSocketAddress ?: throw IOException("UDP connector returned an unconnected channel")
@@ -102,6 +111,8 @@ internal class UdpForwarder(
                     val created = Session(request.copy(payload = byteArrayOf()), channel, peer, System.nanoTime())
                     channel.register(selector, SelectionKey.OP_READ, created)
                     sessions[key] = created
+                    val address = peer as? InetSocketAddress
+                    onConnected?.invoke(address?.address?.hostAddress?.let { Endpoint(it, address.port) })
                     created
                 } catch (error: Throwable) {
                     channel.close()
@@ -112,7 +123,7 @@ internal class UdpForwarder(
             if (written != request.payload.size) throw IOException("UDP datagram could not be sent without blocking")
             session.touched = System.nanoTime()
         } catch (error: Exception) {
-            emit(DyltunEvent.ConnectionError(request.connection, error))
+            emit(request.error(error))
             remove(key)
         }
     }
@@ -120,7 +131,7 @@ internal class UdpForwarder(
     private fun remove(key: Key) {
         val session = sessions.remove(key) ?: return
         try { session.channel.close() } catch (error: IOException) {
-            emit(DyltunEvent.ConnectionError(session.request.connection, error))
+            emit(session.request.error(error))
         }
     }
 
